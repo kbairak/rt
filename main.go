@@ -22,15 +22,19 @@ func main() {
 	}
 	defer restore()
 
-	se := getShellEnv(shell)
-	defer se.Cleanup()
+	env, args, cleanup, err := getShellEnv(shell)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "shell env: %v\n", err)
+		os.Exit(1)
+	}
+	defer cleanup()
 
 	rows, cols, err := pty.Getsize(os.Stdin)
-	if err != nil {
+	if err != nil || rows < 1 || cols < 1 {
 		rows, cols = 24, 80
 	}
 
-	master, childCmd, err := spawnPTY(shell, Winsize{Rows: uint16(rows), Cols: uint16(cols)}, se.Env, se.Args)
+	master, childCmd, err := spawnPTY(shell, pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)}, env, args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "spawn pty: %v\n", err)
 		os.Exit(1)
@@ -46,25 +50,21 @@ func main() {
 	sigterm := make(chan os.Signal, 1)
 	signal.Notify(sigterm, syscall.SIGTERM)
 
-	store := NewBlockStore()
-	cmdQueue := NewCommandQueue()
-	parser := newBlockParser(store, cmdQueue)
+	store := &BlockStore{}
+	parser := newBlockParser(store, cols)
+	parser.Resize(rows, cols)
 	renderCh := make(chan struct{}, 10)
 
-	// PTY reader: feed parser only. No live passthrough to screen.
+	// PTY reader: feed the emulator + parser, signal for repaint.
 	go func() {
 		buf := make([]byte, 32768)
-		prevBlocks := 0
 		for {
 			n, rerr := master.Read(buf)
 			if n > 0 {
 				parser.Feed(buf[:n])
-				if store.Len() > prevBlocks {
-					prevBlocks = store.Len()
-					select {
-					case renderCh <- struct{}{}:
-					default:
-					}
+				select {
+				case renderCh <- struct{}{}:
+				default:
 				}
 			}
 			if rerr != nil {
@@ -74,27 +74,23 @@ func main() {
 		}
 	}()
 
-	// stdin reader: forward keystrokes to PTY
-	keyCh := make(chan []byte, 32)
+	// stdin reader: forward keystrokes to the PTY.
 	stdinDone := make(chan struct{})
 	go func() {
 		buf := make([]byte, 4096)
 		for {
 			n, rerr := os.Stdin.Read(buf)
 			if n > 0 {
-				keyCh <- append([]byte(nil), buf[:n]...)
+				forwardInput(buf[:n], master)
 			}
 			if rerr != nil {
 				close(stdinDone)
-				close(keyCh)
 				return
 			}
 		}
 	}()
 
-	input := ""
-	inEsc := 0
-	Render(store, input)
+	Render(store, parser.Live())
 
 loop:
 	for {
@@ -103,12 +99,25 @@ loop:
 			if !ok {
 				break loop
 			}
-			Render(store, input)
+			// coalesce bursts: drain all pending repaint signals
+			for {
+				select {
+				case <-renderCh:
+				default:
+					goto done
+				}
+			}
+		done:
+			Render(store, parser.Live())
 
 		case <-sigwinch:
-			rows, cols, _ := pty.Getsize(os.Stdin)
+			rows, cols, _ = pty.Getsize(os.Stdin)
+			if rows < 1 || cols < 1 {
+				rows, cols = 24, 80
+			}
 			_ = resizePTY(master, uint16(rows), uint16(cols))
-			Render(store, input)
+			parser.Resize(rows, cols)
+			Render(store, parser.Live())
 
 		case <-sigint:
 			if childCmd != nil && childCmd.Process != nil {
@@ -121,16 +130,6 @@ loop:
 
 		case <-stdinDone:
 			break loop
-
-		case data, ok := <-keyCh:
-			if !ok {
-				break loop
-			}
-			changed, newInput := handleInput(data, master, cmdQueue, input, &inEsc)
-			if changed {
-				input = newInput
-				Render(store, input)
-			}
 		}
 	}
 
@@ -142,45 +141,9 @@ loop:
 	os.Exit(code)
 }
 
-// handleInput forwards key bytes to the child and tracks the prompt line
-// for display. Returns (displayChanged, newInput).
-func handleInput(data []byte, master *os.File, cmds *CommandQueue, input string, inEsc *int) (bool, string) {
-	changed := false
-	for _, b := range data {
-		if b == 0x1b {
-			*inEsc = 3
-		}
-		if *inEsc > 0 {
-			*inEsc--
-			_, _ = master.Write([]byte{b})
-			continue
-		}
-
-		switch b {
-		case '\r':
-			cmds.Push(input)
-			_, _ = master.Write([]byte{b})
-			input = ""
-			changed = true
-		case '\n':
-			_, _ = master.Write([]byte{b})
-		case 0x7f, 0x08:
-			_, _ = master.Write([]byte{b})
-			if len(input) > 0 {
-				input = input[:len(input)-1]
-				changed = true
-			}
-		case 0x03, 0x04, 0x15:
-			_, _ = master.Write([]byte{b})
-			input = ""
-			changed = true
-		default:
-			_, _ = master.Write([]byte{b})
-			if b >= 0x20 {
-				input += string(b)
-				changed = true
-			}
-		}
-	}
-	return changed, input
+// forwardInput relays keystrokes straight to the child. The command text
+// is not tracked here — the archive grid's own echo row is the canonical
+// record of what was typed.
+func forwardInput(data []byte, master *os.File) {
+	_, _ = master.Write(data)
 }

@@ -74,8 +74,8 @@ terminal and the shell, acting as a transparent proxy for stdin/stdout/stderr.
 Detect when a command starts and when it finishes. Capture:
 
 - The command string (what the user typed)
-- The full stdout/stderr output
-- The exit code
+- The full stdout/stderr output, resolved to a rendered cell grid
+  (see block data model)
 
 Each command-output pair forms a single block stored in memory.
 
@@ -93,15 +93,17 @@ blocks. The rendering must handle terminal resize events gracefully.
 | ---------------------- | ------------------------------------------------------ | ---------------------------------------------------------- |
 | Architecture           | PTY multiplexer                                        | Only approach that works with any terminal                 |
 | Language               | Go                                                     | Single binary, no runtime deps, mature PTY libraries       |
-| TUI library            | tcell                                                  | Lightweight cell-buffer abstraction, no framework overhead |
+| Screen emulation       | vt10x (VT terminal state machine)                      | Resolves draw streams to absolute cell grids; no hand-rolled ANSI text reconstruction |
+| Capture model          | Live emulator + tall-grid replay per command           | Live grid = current screen; tall replay preserves full output that scrolls off the live grid |
+| Render model           | Stateless repaint-from-scratch, frozen grids           | Blocks never replayed; resize = repaint + crop             |
 | Shell                  | zsh (PoC)                                              | macOS default, narrow scope for MVP                        |
 | Shell integration      | Delimiter injection via $PROMPT hooks                  | Reliable command boundary detection                        |
 | Injection method       | Wrapper binary (`rt zsh`)                              | Zero config; no rc file modification required              |
-| Full-screen apps       | Auto-detect alternate screen, fall back to normal mode | vim/less/man transparently supported                       |
-| Block data model       | Minimal (cmd, output, exit code)                       | Rich fields deferred                                       |
+| Full-screen apps       | Undefined for PoC (alt-screen passthrough deferred)    | vim/less/man behavior not specified                        |
+| Block data model       | Command + frozen cell grid (chars + colors)            | Rendered output stored as-painted, not as reconstructed text |
 | History persistence    | None for PoC                                           | Blocks lost on exit                                        |
 | Navigation/keybindings | None for PoC                                           | User cannot interact with historical blocks                |
-| Scrollback             | Custom buffer in memory                                | Terminal-native scrollback not used                        |
+| Scrollback             | Tall archive grids in memory                           | Terminal-native scrollback not used                        |
 | Selection/copy         | Undefined for PoC                                      | Mouse behavior unspecified                                 |
 
 ---

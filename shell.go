@@ -18,43 +18,33 @@ fi
 
 const hookFileName = "hook.sh"
 
-type ShellEnv struct {
-	Env     []string
-	Args    []string
-	Cleanup func()
-}
-
-func getShellEnv(shell string) *ShellEnv {
-	dir, err := os.MkdirTemp("", "rt-*")
-	if err != nil {
-		panic(err)
+// getShellEnv prepares a temp dir with a hook that injects the RTMRK
+// prompt marker, returning the environment and argv to spawn the shell
+// with, plus a cleanup that removes the temp dir.
+func getShellEnv(shell string) (env []string, args []string, cleanup func(), err error) {
+	dir, derr := os.MkdirTemp("", "rt-*")
+	if derr != nil {
+		return nil, nil, nil, derr
 	}
-	cleanup := func() { _ = os.RemoveAll(dir) }
+	cleanup = func() { _ = os.RemoveAll(dir) }
 
 	hookPath := filepath.Join(dir, hookFileName)
-	if err := os.WriteFile(hookPath, []byte(rtHookScript), 0o600); err != nil {
+	if werr := os.WriteFile(hookPath, []byte(rtHookScript), 0o600); werr != nil {
 		cleanup()
-		panic(err)
+		return nil, nil, nil, werr
 	}
 
 	base := filepath.Base(shell)
 	switch base {
 	case "zsh":
 		zshrc := `source "` + hookPath + `"`
-		if err := os.WriteFile(filepath.Join(dir, ".zshrc"), []byte(zshrc), 0o600); err != nil {
+		if werr := os.WriteFile(filepath.Join(dir, ".zshrc"), []byte(zshrc), 0o600); werr != nil {
 			cleanup()
-			panic(err)
+			return nil, nil, nil, werr
 		}
-		return &ShellEnv{
-			Env:     append(os.Environ(), "ZDOTDIR="+dir),
-			Cleanup: cleanup,
-		}
+		return append(os.Environ(), "ZDOTDIR="+dir), nil, cleanup, nil
 	default:
 		// bash/sh — use ENV (POSIX) or --rcfile (bash)
-		return &ShellEnv{
-			Env:     append(os.Environ(), "ENV="+hookPath),
-			Args:    []string{"--rcfile", hookPath},
-			Cleanup: cleanup,
-		}
+		return append(os.Environ(), "ENV="+hookPath), []string{"--rcfile", hookPath}, cleanup, nil
 	}
 }

@@ -7,18 +7,10 @@ import (
 	"github.com/creack/pty"
 )
 
-type Winsize struct {
-	Rows uint16
-	Cols uint16
-}
-
-func spawnPTY(shell string, ws Winsize, env []string, args []string) (master *os.File, cmd *exec.Cmd, err error) {
+func spawnPTY(shell string, ws pty.Winsize, env []string, args []string) (master *os.File, cmd *exec.Cmd, err error) {
 	cmd = exec.Command(shell, args...)
 	cmd.Env = env
-	master, err = pty.StartWithSize(cmd, &pty.Winsize{
-		Rows: ws.Rows,
-		Cols: ws.Cols,
-	})
+	master, err = pty.StartWithSize(cmd, &ws)
 	if err != nil {
 		return nil, nil, err
 	}

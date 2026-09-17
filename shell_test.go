@@ -6,13 +6,18 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/creack/pty"
 )
 
 func TestDelimiterMarkers(t *testing.T) {
-	se := getShellEnv("/bin/zsh")
-	defer se.Cleanup()
+	env, args, cleanup, err := getShellEnv("/bin/zsh")
+	if err != nil {
+		t.Fatalf("getShellEnv: %v", err)
+	}
+	defer cleanup()
 
-	master, _, err := spawnPTY("/bin/zsh", Winsize{Rows: 40, Cols: 120}, se.Env, se.Args)
+	master, _, err := spawnPTY("/bin/zsh", pty.Winsize{Rows: 40, Cols: 120}, env, args)
 	if err != nil {
 		t.Fatalf("spawnPTY: %v", err)
 	}

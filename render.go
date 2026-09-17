@@ -5,65 +5,201 @@ import (
 	"os"
 	"strings"
 
+	"github.com/hinshun/vt10x"
 	"golang.org/x/term"
 )
 
+// InitTerminal puts stdin in raw mode (keystrokes delivered unprocessed,
+// no echo) and enters the alternate screen buffer so rt's renders replace
+// the user's screen and are fully restored on exit. Bracketed paste is
+// disabled so pasted text arrives unwrapped (rt's renderer owns paste
+// handling, not the terminal). Returns a restore function that undoes all
+// of this; callers must run it before exiting.
 func InitTerminal() (func(), error) {
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
 		return nil, err
 	}
-	os.Stdout.WriteString("\x1b[?1049h\x1b[2J\x1b[H\x1b[?2004l")
+	os.Stdout.WriteString(AnsiAltOn + AnsiED + AnsiHome + AnsiBracketOff)
 	return func() {
-		os.Stdout.WriteString("\x1b[?25h")
-		os.Stdout.WriteString("\x1b[r")
-		os.Stdout.WriteString("\x1b[?1049l")
+		os.Stdout.WriteString(AnsiShowCursor + AnsiResetScroll + AnsiAltOff)
 		_ = term.Restore(int(os.Stdin.Fd()), oldState)
 	}, nil
 }
 
-func Render(store *BlockStore, input string) {
+// Glyph attribute bits mirrored from vt10x's unexported attr* constants.
+const (
+	attrReverse   = 1 << 0
+	attrUnderline = 1 << 1
+	attrBold      = 1 << 2
+	attrItalic    = 1 << 4
+	attrBlink     = 1 << 5
+)
+
+// separator between historical blocks
+const sepChar = "─"
+
+// Render composes the full frame: the live emulator grid at the top,
+// then a separator + frozen grid per historical block, newest first.
+// Past grids are never re-rendered through the emulator; if the terminal
+// is narrower than a saved grid, the grid is cropped.
+func Render(store *BlockStore, live vt10x.View) {
 	rows, cols := getTermSize()
+	liveGrid, cx, cy := snapshotGrid(live)
+	// trim leading empty rows: the live emulator's screen is cleared at
+	// each command boundary, so everything before the current prompt is
+	// blank and must not consume frame rows.
+	top := 0
+	for top < len(liveGrid) && rowEmpty(liveGrid[top]) {
+		top++
+	}
+	liveGrid = liveGrid[top:]
+	cy -= top
+	if cy < 0 {
+		cy = 0
+	}
+
 	var buf bytes.Buffer
+	buf.WriteString(AnsiHome + AnsiED + AnsiHideCursor) // repaint start
 
-	// scroll region: row 1 is fixed prompt, rows 2..N scroll for blocks
-	buf.WriteString("\x1b[2;" + itoa(rows) + "r")
-	buf.WriteString("\x1b[H\x1b[2J")
-	buf.WriteString("\x1b[?25l") // hide cursor while repainting
+	y := 0
+	curY, curX := 0, 0
+	if len(liveGrid) > 0 {
+		for y < len(liveGrid) {
+			if y >= rows {
+				break
+			}
+			row, stripped := stripMarker(liveGrid[y])
+			if y == cy && stripped && cx >= len(marker) {
+				cx -= len(marker)
+			}
+			renderRow(&buf, row, cols, y)
+			y++
+		}
+		curX, curY = cx, cy
+	}
 
-	// prompt at row 1
-	buf.WriteString("> ")
-	buf.WriteString(input)
-	buf.WriteString("\x1b[K")
-	buf.WriteString("\r\n") // return to col 1 before moving into scroll region
-
-	// blocks newest-first, each preceded by a separator
 	blocks := store.All()
 	for i := len(blocks) - 1; i >= 0; i-- {
-		buf.WriteString(strings.Repeat("─", cols))
-		buf.WriteString("\r\n")
-		buf.WriteString("> ")
-		buf.WriteString(stripANSI(blocks[i].Command))
-		buf.WriteString("\r\n")
-		out := stripCR(stripANSI(blocks[i].Output))
-		out = strings.ReplaceAll(out, "\n", "\r\n")
-		out = strings.ReplaceAll(out, "RTMRK", "")
-		// strip first line (shell echo of command)
-		if idx := strings.Index(out, "\r\n"); idx >= 0 {
-			out = out[idx+2:]
+		b := blocks[i]
+		if y >= rows {
+			break
 		}
-		buf.WriteString(out)
-		if len(out) > 0 && !strings.HasSuffix(out, "\r\n") {
-			buf.WriteString("\r\n")
+		sep := cursorPos(y, 0) + strings.Repeat(sepChar, cols)
+		buf.WriteString(sep)
+		y++
+		for _, row := range b.Cells {
+			if y >= rows {
+				break
+			}
+			renderRow(&buf, row, cols, y)
+			y++
 		}
 	}
 
-	// position cursor after prompt for input
-	col := 3 + len(input)
-	buf.WriteString("\x1b[1;" + itoa(col) + "H")
-	buf.WriteString("\x1b[?25h") // show cursor
+	// plant the cursor back on the live screen
+	if curY < 0 {
+		curY = 0
+	}
+	if curX < 0 {
+		curX = 0
+	}
+	if curY >= rows {
+		curY = rows - 1
+	}
+	if curX >= cols {
+		curX = cols - 1
+	}
+	buf.WriteString(cursorPos(curY, curX))
+	buf.WriteString(AnsiShowCursor) // show cursor
 
 	os.Stdout.Write(buf.Bytes())
+}
+
+// renderRow paints one grid row at absolute row y (0-based), truncated to
+// width w. Emits SGR only when the cell attributes change from the last
+// emitted cell.
+func renderRow(buf *bytes.Buffer, row []vt10x.Glyph, w, y int) {
+	buf.WriteString(cursorPos(y, 0))
+	var last vt10x.Glyph
+	first := true
+	for x := 0; x < w && x < len(row); x++ {
+		g := row[x]
+		if first || g.FG != last.FG || g.BG != last.BG || g.Mode != last.Mode {
+			buf.WriteString(sgr(g))
+			last = g
+			first = false
+		}
+		c := g.Char
+		if c == 0 {
+			c = ' '
+		}
+		buf.WriteRune(c)
+	}
+	buf.WriteString(AnsiSGRReset)
+}
+
+func sgr(g vt10x.Glyph) string {
+	var parts []string
+	parts = append(parts, "0")
+	if g.Mode&attrBold != 0 {
+		parts = append(parts, "1")
+	}
+	if g.Mode&attrItalic != 0 {
+		parts = append(parts, "3")
+	}
+	if g.Mode&attrUnderline != 0 {
+		parts = append(parts, "4")
+	}
+	if g.Mode&attrBlink != 0 {
+		parts = append(parts, "5")
+	}
+	if g.Mode&attrReverse != 0 {
+		parts = append(parts, "7")
+	}
+	if fg := colorCode(g.FG, true); fg != "" {
+		parts = append(parts, fg)
+	}
+	if bg := colorCode(g.BG, false); bg != "" {
+		parts = append(parts, bg)
+	}
+	return sgrSeq(parts)
+}
+
+func colorCode(c vt10x.Color, fg bool) string {
+	if fg && c == vt10x.DefaultFG || !fg && c == vt10x.DefaultBG {
+		if fg {
+			return "39"
+		}
+		return "49"
+	}
+	if c < 8 {
+		if fg {
+			return itoa(int(c) + 30)
+		}
+		return itoa(int(c) + 40)
+	}
+	if c < 16 {
+		if fg {
+			return itoa(int(c) + 90 - 8)
+		}
+		return itoa(int(c) + 100 - 8)
+	}
+	if c < 1<<24 {
+		// xterm 256-color
+		if fg {
+			return "38;5;" + itoa(int(c))
+		}
+		return "48;5;" + itoa(int(c))
+	}
+	// truecolor
+	r := int(c>>16) & 0xff
+	g := int(c>>8) & 0xff
+	b := int(c) & 0xff
+	if fg {
+		return "38;2;" + itoa(r) + ";" + itoa(g) + ";" + itoa(b)
+	}
+	return "48;2;" + itoa(r) + ";" + itoa(g) + ";" + itoa(b)
 }
 
 func itoa(n int) string {
@@ -88,78 +224,10 @@ func itoa(n int) string {
 	return string(b[i:])
 }
 
-func stripCR(s string) string {
-	s = strings.ReplaceAll(s, "\r", "")
-	s = expandTabs(s, 8)
-	return s
-}
-
-func expandTabs(s string, cols int) string {
-	var buf bytes.Buffer
-	for _, ch := range s {
-		if ch == '\t' {
-			col := buf.Len() % cols
-			n := cols - col
-			for i := 0; i < n; i++ {
-				buf.WriteByte(' ')
-			}
-		} else {
-			buf.WriteRune(ch)
-		}
-	}
-	return buf.String()
-}
-
-func stripANSI(s string) string {
-	var buf bytes.Buffer
-	i := 0
-	for i < len(s) {
-		c := s[i]
-		if c == '\x1b' {
-			if i+1 < len(s) && s[i+1] == '[' {
-				// CSI: skip until final byte (0x40-0x7e)
-				j := i + 2
-				for j < len(s) && (s[j] < 0x20 || (s[j] >= 0x30 && s[j] <= 0x3f) || s[j] == 0x7f) {
-					j++
-				}
-				if j < len(s) {
-					j++ // final byte
-				}
-				i = j
-			} else if i+1 < len(s) && (s[i+1] == ']' || s[i+1] == 'P' || s[i+1] == 'X' || s[i+1] == '_' || s[i+1] == '^') {
-				// OSC/DCS/APC/PM/SOS: skip to ST (0x9c, ESC \)
-				j := i + 2
-				for j < len(s) {
-					if s[j] == '\x1b' && j+1 < len(s) && s[j+1] == '\\' {
-						j += 2
-						break
-					}
-					j++
-				}
-				i = j
-			} else if i+1 < len(s) && s[i+1] == '\\' {
-				i += 2 // ST alone
-			} else {
-				// lone ESC sequence (2-char)
-				i += 2
-			}
-		} else {
-			buf.WriteByte(s[i])
-			i++
-		}
-	}
-	return buf.String()
-}
-
 func getTermSize() (rows, cols int) {
 	r, c, err := term.GetSize(int(os.Stdin.Fd()))
 	if err != nil || r <= 0 || c <= 0 {
 		return 24, 80
 	}
 	return r, c
-}
-
-func getTermWidth() int {
-	_, cols := getTermSize()
-	return cols
 }
