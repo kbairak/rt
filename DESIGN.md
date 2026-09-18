@@ -74,8 +74,8 @@ terminal and the shell, acting as a transparent proxy for stdin/stdout/stderr.
 Detect when a command starts and when it finishes. Capture:
 
 - The command string (what the user typed)
-- The full stdout/stderr output, resolved to a rendered cell grid
-  (see block data model)
+- The full stdout/stderr output
+- The exit code
 
 Each command-output pair forms a single block stored in memory.
 
@@ -87,24 +87,56 @@ blocks. The rendering must handle terminal resize events gracefully.
 
 ---
 
-## Design Decisions
+## Implementation outline
 
-| Decision               | Choice                                                 | Rationale                                                  |
-| ---------------------- | ------------------------------------------------------ | ---------------------------------------------------------- |
-| Architecture           | PTY multiplexer                                        | Only approach that works with any terminal                 |
-| Language               | Go                                                     | Single binary, no runtime deps, mature PTY libraries       |
-| Screen emulation       | vt10x (VT terminal state machine)                      | Resolves draw streams to absolute cell grids; no hand-rolled ANSI text reconstruction |
-| Capture model          | Live emulator + tall-grid replay per command           | Live grid = current screen; tall replay preserves full output that scrolls off the live grid |
-| Render model           | Stateless repaint-from-scratch, frozen grids           | Blocks never replayed; resize = repaint + crop             |
-| Shell                  | zsh (PoC)                                              | macOS default, narrow scope for MVP                        |
-| Shell integration      | Delimiter injection via $PROMPT hooks                  | Reliable command boundary detection                        |
-| Injection method       | Wrapper binary (`rt zsh`)                              | Zero config; no rc file modification required              |
-| Full-screen apps       | Undefined for PoC (alt-screen passthrough deferred)    | vim/less/man behavior not specified                        |
-| Block data model       | Command + frozen cell grid (chars + colors)            | Rendered output stored as-painted, not as reconstructed text |
-| History persistence    | None for PoC                                           | Blocks lost on exit                                        |
-| Navigation/keybindings | None for PoC                                           | User cannot interact with historical blocks                |
-| Scrollback             | Tall archive grids in memory                           | Terminal-native scrollback not used                        |
-| Selection/copy         | Undefined for PoC                                      | Mouse behavior unspecified                                 |
+- Variables:
+  - buffer: buffer of bytes
+  - vt: vt instance
+  - history: slice of blocks, blocks are stripped vt10x grids
+  - width, height: dimensions of the terminal
+- We set raw+altscreen
+- Create log file with timestamp in name
+- We add the PS1 stuff in a temporary rc file and load sh with the temp file as its only configuration
+- We open a pty with sh
+- event handlers/goroutines:
+  - read from main's stdin:
+    - pprint chunk into log file
+    - feed into pty
+  - read from pty:
+    - pprint chunk into log file
+    - feed chunk into buffer
+  - renderer, 30FPS:
+    - if buffer empty and size unchanged, do nothing
+    - if buffer contains separator:
+      - feed until separator into vt
+      - strip vt's grid and, if not empty, append to history
+      - reset vt
+      - chunk is now part of buffer after separator
+      - buffer is empty
+    - else if buffer ends in part of the separator:
+      - chunk is part of buffer until separator prefix
+      - buffer is separator prefix (will be read at next render)
+    - else:
+      - chunk is entire buffer
+      - buffer is empty
+    - feed chunk into vt
+    - clear screen, put cursor at 0,0
+    - strip vt's grid and print it, counting lines
+    - for block in reversed history:
+      - print separator, taking current width into account, count one line
+      - print block's grid, respecting the current width, counting lines
+      - when printed lines reach terminal's height, stop
+      - Note: stop mid-block when reach height to avoid scrolling
+    - reset cursor position to vt's cursor position
+- terminal size change:
+  - update width and height variables
+  - update pty's size
+  - update vt's dimensions
+  - (next render will adapt automatically)
+
+Notes:
+
+- Separator is zero-width-private-escape ensuring it's after \r\n
 
 ---
 
@@ -119,3 +151,16 @@ blocks. The rendering must handle terminal resize events gracefully.
 - Custom keybindings
 - bash support (trivial to add after PoC)
 
+## TODOs
+
+- [ ] If consecutive blocks in the history are identical, modify the horizontal separator from `----...` to `- 3x ----...` above the history block and print it once
+- [ ] Make CTRL-l clear the screen in rt
+- [ ] Block invoking rt from rt
+- [ ] separator logic per shell
+  - [ ] Shell is `args[1] || $SHELL`
+  - [ ] Try to figure out which shell it is (eg '/bin/zsh' -> '/zsh')
+  - [ ] User can override with `--mode` flag
+- [ ] fullscreen app behavior, options:
+  - [x] Do nothing, vt10x initialized with stdin's size, child process will render everything, our renderer will not have to go into the history
+  - [ ] Force vt10x's size to be 80% of stdin's size, render will naturally print the first history orders
+  - [ ] Intercept alt-screen ANSI code from pty, if set set vt10x's width as 70% of stdin's width (keep height 100%) and try to render the history to the right of the fullscreen app
