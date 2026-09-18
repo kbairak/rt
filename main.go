@@ -52,6 +52,10 @@ type rtState struct {
 }
 
 func main() {
+	if os.Getenv("REVERSE_TERMINAL") != "" {
+		fmt.Fprintln(os.Stderr, "nested rt unsupported")
+		os.Exit(1)
+	}
 	interactive := term.IsTerminal(int(os.Stdin.Fd()))
 	var restore = func() {}
 	if interactive {
@@ -86,7 +90,7 @@ func main() {
 	defer script.cleanup()
 
 	cmd := exec.Command("sh")
-	cmd.Env = append(os.Environ(), "ENV="+script.path)
+	cmd.Env = append(os.Environ(), "ENV="+script.path, "REVERSE_TERMINAL=1")
 	master, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "pty:", err)

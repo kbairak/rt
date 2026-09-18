@@ -159,8 +159,8 @@ Notes:
 - [ ] Make CTRL-l clear the screen in rt (drop history, keep prompt)
   - [ ] Only intercept at prompt-idle: pty buffer empty AND past separator AND child not in alt-screen (track `inAltScreen` flag)
   - [ ] When swallowed: clear `rt.his`, repaint, do NOT forward to child
-- [ ] Block invoking rt from rt
-  - [ ] Outer rt sets env var (e.g. `RT=1`) on the pty child next to `ENV=`; inner rt checks `os.Environ()` at startup, prints "nested rt unsupported", exits. Do NOT match on command name (aliases/full paths cloak it)
+- [x] Block invoking rt from rt
+  - [x] Outer rt sets env var (e.g. `RT=1`) on the pty child next to `ENV=`; inner rt checks `os.Environ()` at startup, prints "nested rt unsupported", exits. Do NOT match on command name (aliases/full paths cloak it)
 - [ ] separator logic per shell
   - [ ] Shell is `args[1] || $SHELL`
   - [ ] Try to figure out which shell it is (eg '/bin/zsh' -> 'zsh')
