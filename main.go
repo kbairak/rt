@@ -31,6 +31,7 @@ type block struct {
 	cells [][]vt10x.Glyph
 	width int
 	code  int
+	hash  uint64
 }
 
 // rtState owns everything: buffer (stdin reader writes, renderer drains), the
@@ -230,7 +231,7 @@ func (rt *rtState) tick() {
 	if rt.drain {
 		g, _, _ := rt.snapshot()
 		if g != nil {
-			rt.his = append(rt.his, block{cells: g, width: rt.width, code: rt.finalCode})
+			rt.his = append(rt.his, newBlock(g, rt.width, rt.finalCode))
 			rt.log.event("block " + itoa(len(rt.his)) + " (final)")
 			rt.dirty = true
 		}

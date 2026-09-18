@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"strings"
 	"sync"
@@ -84,13 +86,73 @@ func holdLen(b []byte) int {
 // boundary runs when a prompt marker arrives: the just-finished command's grid
 // is frozen into history with its exit code (unless this is the first,
 // bootstrap, prompt).
+var (
+	blockHasher = fnv.New64a()
+	buf8        [8]byte
+	buf4        [4]byte
+	buf2        [2]byte
+)
+
+// newBlock wraps a finished grid with its exit code and a cached content hash.
+// Every history append MUST go through here so blocksEqual's hash fast path
+// works; a hand-built literal leaves hash zero and fast-rejects everything.
+func newBlock(g [][]vt10x.Glyph, width, code int) block {
+	return block{cells: g, width: width, code: code, hash: blockHash(g)}
+}
+
+// blockHash folds the grid (dims + every glyph's Char/FG/BG/Mode) into a
+// 64-bit FNV-1a. Exit code is not included: it is metadata, not content.
+func blockHash(cells [][]vt10x.Glyph) uint64 {
+	blockHasher.Reset()
+	for _, row := range cells {
+		binary.LittleEndian.PutUint64(buf8[:], uint64(len(row)))
+		blockHasher.Write(buf8[:])
+		for _, g := range row {
+			binary.LittleEndian.PutUint64(buf8[:], uint64(g.Char))
+			blockHasher.Write(buf8[:])
+			binary.LittleEndian.PutUint16(buf2[:], uint16(g.Mode))
+			blockHasher.Write(buf2[:])
+			binary.LittleEndian.PutUint32(buf4[:], uint32(g.FG))
+			blockHasher.Write(buf4[:])
+			binary.LittleEndian.PutUint32(buf4[:], uint32(g.BG))
+			blockHasher.Write(buf4[:])
+		}
+	}
+	return blockHasher.Sum64()
+}
+
+// blocksEqual reports whether a and b are identical grids: same dimensions
+// and same Char/FG/BG/Mode in every cell. Exit code is not compared. The
+// cached hash rejects most pairs in O(1); the cell walk runs only when the
+// hashes collide (guarantees no false collapse, bilaterally).
+func blocksEqual(a, b block) bool {
+	if a.hash != b.hash {
+		return false
+	}
+	if len(a.cells) != len(b.cells) {
+		return false
+	}
+	for y := range a.cells {
+		ra, rb := a.cells[y], b.cells[y]
+		if len(ra) != len(rb) {
+			return false
+		}
+		for x := range ra {
+			if ra[x] != rb[x] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (rt *rtState) boundary(code int) {
 	rt.log.event("sep")
 	rt.dirty = true
 	if !rt.first {
 		g, _, _ := rt.snapshot()
 		if g != nil {
-			rt.his = append(rt.his, block{cells: g, width: rt.width, code: code})
+			rt.his = append(rt.his, newBlock(g, rt.width, code))
 			rt.log.event("block " + itoa(len(rt.his)))
 		}
 	} else {
@@ -163,12 +225,12 @@ func (rt *rtState) repaint() {
 			break
 		}
 		b := rt.his[k]
-		var sep bytes.Buffer
-		sep.WriteString("─ [" + itoa(b.code) + "] ")
-		for i := len(sep.Bytes()); i < cols; i++ {
-			sep.WriteString("─")
+		rep := 1
+		for j := k - 1; j >= 0 && blocksEqual(b, rt.his[j]); j-- {
+			rep++
 		}
-		fmt.Fprintf(&frame, "%s%s", cursorPos(y, 0), sep.Bytes())
+		k -= rep - 1 // skip the older, now-collapsed duplicates
+		fmt.Fprintf(&frame, "%s%s", cursorPos(y, 0), sepText(rep, b.code, cols))
 		y++
 		for r := 0; r < len(b.cells); r++ {
 			if y >= rows {
@@ -269,6 +331,21 @@ func colorCode(c vt10x.Color, fg bool) string {
 		return "38;2;" + itoa(r) + ";" + itoa(g) + ";" + itoa(b)
 	}
 	return "48;2;" + itoa(r) + ";" + itoa(g) + ";" + itoa(b)
+}
+
+// sepText renders a block-run separator filling the full width: "────…─── [code] -"
+// for a run of one, "────…── 3x [code] -" for a collapsed run of N. Info is
+// right-aligned so both forms look the same length and left edges line up.
+func sepText(rep, code, cols int) string {
+	suffix := " [" + itoa(code) + "] -"
+	if rep > 1 {
+		suffix = " " + itoa(rep) + "x [" + itoa(code) + "] -"
+	}
+	n := cols - len(suffix)
+	if n < 0 {
+		n = 0
+	}
+	return strings.Repeat("─", n) + suffix
 }
 
 func cursorPos(row, col int) string {
