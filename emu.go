@@ -22,16 +22,9 @@ func (rt *rtState) compose(data []byte) {
 	for len(data) > 0 {
 		hi := bytes.Index(data, sepHead)
 		if hi < 0 {
-			// no marker head; hold any trailing head fragment
-			if p := holdLen(data); p > 0 {
-				hold := len(data) - p
-				if hold > 0 {
-					_, _ = rt.vt.Write(data[:hold])
-				}
-				rt.buffer = append(rt.buffer, data[hold:]...)
-			} else {
-				_, _ = rt.vt.Write(data)
-			}
+			// no marker head; the holdReader already guarantees no head
+			// fragment trails the chunk
+			_, _ = rt.vt.Write(data)
 			return
 		}
 		rest := data[hi+len(sepHead):]
@@ -68,19 +61,50 @@ func (rt *rtState) compose(data []byte) {
 	}
 }
 
-// holdLen returns the length of the longest suffix of b that is a proper
-// prefix of sepHead (0 if none). Detects a marker head split across two chunks.
-func holdLen(b []byte) int {
-	limit := len(sepHead) - 1
-	if limit > len(b) {
-		limit = len(b)
+// trackAltScreen sets *inAlt from complete DEC 1049 enter/leave sequences in
+// data. Sequences arrive whole thanks to holdReader, but a trailing header
+// prefix is guarded anyway.
+func trackAltScreen(data []byte, inAlt *bool) {
+	from := 0
+	for {
+		j := bytes.Index(data[from:], []byte(altPrefixHeader))
+		if j < 0 {
+			return
+		}
+		j += from
+		k := j + len(altPrefixHeader)
+		if k >= len(data) {
+			return
+		}
+		switch data[k] {
+		case 'h':
+			*inAlt = true
+		case 'l':
+			*inAlt = false
+		}
+		from = k + 1
 	}
-	for l := limit; l > 0; l-- {
-		if bytes.HasSuffix(b[:l], sepHead[:l]) {
-			return l
+}
+
+// swallowCtrlL intercepts a pure CTRL-l read at the idle rt prompt: history is
+// cleared instead of forwarding the byte to the shell. Never fires on pastes
+// or mixed reads, mid-command output, the bootstrap prompt, or fullscreen apps.
+func (rt *rtState) swallowCtrlL(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	for _, b := range data {
+		if b != 0x0c {
+			return false
 		}
 	}
-	return 0
+	rt.Lock()
+	defer rt.Unlock()
+	if len(rt.buffer) != 0 || rt.first || rt.inAltScreen {
+		return false
+	}
+	rt.clearReq = true
+	return true
 }
 
 // boundary runs when a prompt marker arrives: the just-finished command's grid

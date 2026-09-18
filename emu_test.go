@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
+	"io"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/hinshun/vt10x"
@@ -142,4 +145,133 @@ func TestCollapsedSeparator(t *testing.T) {
 // displayWidth counts runes; every separator character is one column.
 func displayWidth(s string) int {
 	return utf8.RuneCountInString(s)
+}
+
+func TestHoldPrefixes(t *testing.T) {
+	cases := []struct {
+		name string
+		b    string
+		pfx  []string
+		want int
+	}{
+		{"suffix SEP", "abcSEP", []string{"SEPARATOR"}, 3},
+		{"empty pfx", "SEP", []string{""}, 0},
+		{"esc suffix", "hello \x1b", []string{"\x1b[?1049h", "\x1b[?1049l"}, 1},
+		{"complete not proper", "SEPARATOR", []string{"SEPARATOR"}, 0},
+		{"non-matching end", "SEPx", []string{"SEPARATOR"}, 0},
+		{"empty b", "", []string{"SEPARATOR"}, 0},
+		{"longer overlap wins", "x\x1b[?1049", []string{"\x1b[?1049h", "\x1b[?1049l"}, 7},
+		{"zero-length pfx", "SEP", []string{""}, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var pfx [][]byte
+			for _, s := range c.pfx {
+				pfx = append(pfx, []byte(s))
+			}
+			if got := holdPrefixes([]byte(c.b), pfx); got != c.want {
+				t.Fatalf("holdPrefixes(%q) = %d, want %d", c.b, got, c.want)
+			}
+		})
+	}
+}
+
+func TestTrackAltScreen(t *testing.T) {
+	cases := []struct {
+		name string
+		data string
+		want bool
+	}{
+		{"enter only", "\x1b[?1049h", true},
+		{"leave only", "\x1b[?1049l", false},
+		{"enter then leave", "\x1b[?1049h\x1b[?1049l", false},
+		{"double enter then leave", "\x1b[?1049h\x1b[?1049h\x1b[?1049l", false},
+		{"header then x unchanged", "\x1b[?1049x", false},
+		{"trailing prefix guarded", "\x1b[?1049", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			inAlt := false
+			trackAltScreen([]byte(c.data), &inAlt)
+			if inAlt != c.want {
+				t.Fatalf("trackAltScreen(%q) leaves %v, want %v", c.data, inAlt, c.want)
+			}
+		})
+	}
+}
+
+func TestSwallowCtrlL(t *testing.T) {
+	idle := func() *rtState {
+		return &rtState{}
+	}
+	cases := []struct {
+		name   string
+		rt     *rtState
+		data   string
+		swallow bool
+	}{
+		{"idle pure ctrl-l", idle(), "\x0c", true},
+		{"double ctrl-l", idle(), "\x0c\x0c", true},
+		{"bootstrap prompt", &rtState{first: true}, "\x0c", false},
+		{"buffer non-empty", &rtState{buffer: []byte("x")}, "\x0c", false},
+		{"in alt-screen", &rtState{inAltScreen: true}, "\x0c", false},
+		{"pasted mixed", idle(), "\x0cA", false},
+		{"empty read", idle(), "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := c.rt.swallowCtrlL([]byte(c.data))
+			if got != c.swallow {
+				t.Fatalf("swallowCtrlL = %v, want %v", got, c.swallow)
+			}
+			if c.swallow != (c.rt.clearReq) {
+				t.Fatalf("clearReq = %v, want %v", c.rt.clearReq, c.swallow)
+			}
+		})
+	}
+}
+
+func TestComposeMarkerSplit(t *testing.T) {
+	rt := &rtState{
+		vt:     vt10x.New(vt10x.WithSize(80, 24)),
+		width:  80,
+		height: 24,
+		first:  false,
+		log:    &recorder{init: time.Now(), w: bufio.NewWriter(io.Discard)},
+	}
+	watched := [][]byte{sepHead, []byte(enterAlt), []byte(leaveAlt)}
+	held := newHoldReader(&chunkReader{chunks: [][]byte{
+		[]byte("..cmd\n" + string(sepHead) + "0"),
+		[]byte("\x07> "),
+	}}, func(b []byte) int {
+		return holdPrefixes(b, watched)
+	})
+
+	p := make([]byte, 4096)
+	for {
+		n, err := held.Read(p)
+		if n > 0 {
+			rt.buffer = append(rt.buffer, p[:n]...)
+			buf := rt.buffer
+			rt.buffer = nil
+			rt.compose(buf)
+		}
+		if err != nil {
+			break
+		}
+	}
+	if len(rt.his) != 1 {
+		t.Fatalf("his has %d blocks, want 1", len(rt.his))
+	}
+	found := false
+	for _, row := range rt.his[0].cells {
+		for _, g := range row {
+			if g.Char == 'm' {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("block grid missing command text")
+	}
 }

@@ -26,6 +26,14 @@ var (
 	sepEnd  = byte(0x07)
 )
 
+// DEC 1049 alt-screen toggle, tracked so a ^L at the rt prompt is only
+// intercepted when the shell (not a fullscreen app) is reading.
+const (
+	altPrefixHeader = "\x1b[?1049"
+	enterAlt        = altPrefixHeader + "h"
+	leaveAlt        = altPrefixHeader + "l"
+)
+
 // block is a finished command frozen as a cell grid.
 type block struct {
 	cells [][]vt10x.Glyph
@@ -45,10 +53,12 @@ type rtState struct {
 	his       []block
 	log       *recorder
 	proc      *exec.Cmd
-	dirty     bool
-	first     bool
-	drain     bool
-	finalCode int
+	dirty       bool
+	first       bool
+	drain       bool
+	finalCode   int
+	inAltScreen bool
+	clearReq    bool
 }
 
 func main() {
@@ -107,6 +117,12 @@ func main() {
 		first:  true,
 	}
 
+	// held guarantees pty output never splits a prompt-marker head or an
+	// alt-screen toggle across two reads, so per-chunk detection is complete.
+	held := newHoldReader(master, func(b []byte) int {
+		return holdPrefixes(b, [][]byte{sepHead, []byte(enterAlt), []byte(leaveAlt)})
+	})
+
 	sigwinch := make(chan os.Signal, 1)
 	signal.Notify(sigwinch, syscall.SIGWINCH)
 	sigterm := make(chan os.Signal, 1)
@@ -126,10 +142,11 @@ func main() {
 	go func() {
 		buf := make([]byte, 32768)
 		for {
-			n, rerr := master.Read(buf)
+			n, rerr := held.Read(buf)
 			if n > 0 {
 				rt.log.rx(buf[:n])
 				rt.Lock()
+				trackAltScreen(buf[:n], &rt.inAltScreen)
 				rt.buffer = append(rt.buffer, buf[:n]...)
 				rt.Unlock()
 				wake()
@@ -156,6 +173,11 @@ func main() {
 		for {
 			n, rerr := os.Stdin.Read(buf)
 			if n > 0 {
+				if rt.swallowCtrlL(buf[:n]) {
+					rt.log.event("ctrll")
+					wake()
+					continue
+				}
 				rt.log.tx(buf[:n])
 				_, _ = master.Write(buf[:n])
 			}
@@ -219,6 +241,14 @@ func termSize(f *os.File) (w, h int) {
 // tick drains the buffer into vt at command boundaries, then repaints.
 func (rt *rtState) tick() {
 	rt.Lock()
+	if rt.clearReq {
+		rt.clearReq = false
+		if len(rt.his) > 0 {
+			rt.his = nil
+			rt.log.event("ctrll clear")
+			rt.dirty = true
+		}
+	}
 	if !rt.dirty && len(rt.buffer) == 0 && !rt.drain {
 		rt.Unlock()
 		return
