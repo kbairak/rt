@@ -13,66 +13,90 @@ import (
 // Glyph attribute bits (vt10x private constants, mirrored).
 
 // compose feeds a buffer chunk into rt, splitting finished commands at the
-// prompt separator: bytes before a separator are rendered, snapshotted into
-// history, then the emulator is reset for the next command.
+// prompt marker: bytes before a marker are rendered, snapshotted into history
+// with the command's exit code, then the emulator is reset for the next
+// command.
 func (rt *rtState) compose(data []byte) {
 	for len(data) > 0 {
-		i := bytes.Index(data, sep)
-		if i >= 0 {
-			pre := data[:i]
-			if len(pre) > 0 {
-				_, _ = rt.vt.Write(pre)
+		hi := bytes.Index(data, sepHead)
+		if hi < 0 {
+			// no marker head; hold any trailing head fragment
+			if p := holdLen(data); p > 0 {
+				hold := len(data) - p
+				if hold > 0 {
+					_, _ = rt.vt.Write(data[:hold])
+				}
+				rt.buffer = append(rt.buffer, data[hold:]...)
+			} else {
+				_, _ = rt.vt.Write(data)
 			}
-			rt.boundary()
-			data = data[i+len(sep):]
+			return
+		}
+		rest := data[hi+len(sepHead):]
+		j := 0
+		for j < len(rest) && rest[j] >= '0' && rest[j] <= '9' {
+			j++
+		}
+		if j < len(rest) && rest[j] == sepEnd {
+			// complete marker: command ended, exit code in rest[:j]
+			if hi > 0 {
+				_, _ = rt.vt.Write(data[:hi])
+			}
+			code, _ := parseInt(string(rest[:j]))
+			rt.boundary(code)
+			data = rest[j+1:]
 			continue
 		}
-		p := sepPrefixLen(data)
-		switch {
-		case p == 0:
-			_, _ = rt.vt.Write(data)
-		case p < len(data):
-			hold := len(data) - p
-			_, _ = rt.vt.Write(data[:hold])
-			rt.buffer = append(rt.buffer, data[hold:]...)
-		default:
-			// whole buffer is a partial separator prefix; hold it all
-			rt.buffer = append(rt.buffer, data...)
+		if j >= len(rest) {
+			// marker head (and maybe digits) split across chunks; wait
+			if hi > 0 {
+				_, _ = rt.vt.Write(data[:hi])
+			}
+			rt.buffer = append(rt.buffer, data[hi:]...)
+			return
 		}
-		return
+		// head followed by a non-digit, non-BEL byte: not a real marker
+		if hi+1 < len(data) {
+			_, _ = rt.vt.Write(data[:hi+1])
+			data = data[hi+1:]
+		} else {
+			_, _ = rt.vt.Write(data)
+			return
+		}
 	}
 }
 
-// boundary runs when a prompt separator arrives: the just-finished command's
-// grid is frozen into history (unless this is the first, bootstrap, prompt).
-func (rt *rtState) boundary() {
+// holdLen returns the length of the longest suffix of b that is a proper
+// prefix of sepHead (0 if none). Detects a marker head split across two chunks.
+func holdLen(b []byte) int {
+	limit := len(sepHead) - 1
+	if limit > len(b) {
+		limit = len(b)
+	}
+	for l := limit; l > 0; l-- {
+		if bytes.HasSuffix(b[:l], sepHead[:l]) {
+			return l
+		}
+	}
+	return 0
+}
+
+// boundary runs when a prompt marker arrives: the just-finished command's grid
+// is frozen into history with its exit code (unless this is the first,
+// bootstrap, prompt).
+func (rt *rtState) boundary(code int) {
 	rt.log.event("sep")
 	rt.dirty = true
 	if !rt.first {
 		g, _, _ := rt.snapshot()
 		if g != nil {
-			rt.his = append(rt.his, block{cells: g, width: rt.width})
+			rt.his = append(rt.his, block{cells: g, width: rt.width, code: code})
 			rt.log.event("block " + itoa(len(rt.his)))
 		}
 	} else {
 		rt.first = false
 	}
 	rt.vt = vt10x.New(vt10x.WithSize(rt.width, rt.height))
-}
-
-// sepPrefixLen returns the length of the longest suffix of b that is a proper
-// prefix of sep (0 if none). Detects a separator split across two chunks.
-func sepPrefixLen(b []byte) int {
-	limit := len(sep) - 1
-	if limit > len(b) {
-		limit = len(b)
-	}
-	for l := limit; l > 0; l-- {
-		if bytes.HasSuffix(b[:l], sep[:l]) && bytes.HasPrefix(sep, b[len(b)-l:]) {
-			return l
-		}
-	}
-	return 0
 }
 
 // snapshot copies the emulator grid, trimming trailing empty rows, and
@@ -108,8 +132,8 @@ func (rt *rtState) snapshot() ([][]vt10x.Glyph, int, int) {
 	return grid[:last+1], cx, cy
 }
 
-// repaint writes the full frame: live emulator grid, then history blocks
-// newest-first with a separator row, cropped to terminal height.
+// repaint draws the full frame: live emulator grid, then history blocks
+// newest-first with a header row, cropped to terminal height.
 func (rt *rtState) repaint() {
 	var frame bytes.Buffer
 	rows, cols := rt.height, rt.width
@@ -140,7 +164,8 @@ func (rt *rtState) repaint() {
 		}
 		b := rt.his[k]
 		var sep bytes.Buffer
-		for i := 0; i < cols; i++ {
+		sep.WriteString("─ [" + itoa(b.code) + "] ")
+		for i := len(sep.Bytes()); i < cols; i++ {
 			sep.WriteString("─")
 		}
 		fmt.Fprintf(&frame, "%s%s", cursorPos(y, 0), sep.Bytes())

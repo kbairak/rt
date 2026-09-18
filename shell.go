@@ -19,8 +19,10 @@ func writeRcScript() (rcScript, error) {
 		return rcScript{}, err
 	}
 	path := filepath.Join(dir, "rc")
-	// $'...' ANSI-C quoting embeds literal ESC / BEL in PS1.
-	hook := "PS1=$'\\x1b]" + sepPayload + "\\x07$ '\nPS2='> '\n"
+	// $'...' ANSI-C quoting embeds literal ESC / BEL in PS1. The marker carries
+	// the last command's exit code: $? stays literal in PS1's value and is
+	// expanded by sh each time the prompt is drawn.
+	hook := "PS1=$'\\x1b]" + sepPayload + ";$?\\x07$ '\nPS2='> '\n"
 	if werr := os.WriteFile(path, []byte(hook), 0o600); werr != nil {
 		_ = os.RemoveAll(dir)
 		return rcScript{}, werr

@@ -18,28 +18,36 @@ import (
 // impossible.
 const sepPayload = "RT;7f3a9b"
 
-var sep = append([]byte("\x1b]"), append([]byte(sepPayload), 0x07)...)
+// sepHead opens the zero-width prompt marker; the shell appends the last
+// command's exit code (digits) then sepEnd (BEL). A user cannot type it, so
+// accidental matches are impossible.
+var (
+	sepHead = []byte("\x1b]" + sepPayload + ";")
+	sepEnd  = byte(0x07)
+)
 
 // block is a finished command frozen as a cell grid.
 type block struct {
 	cells [][]vt10x.Glyph
 	width int
+	code  int
 }
 
 // rtState owns everything: buffer (stdin reader writes, renderer drains), the
 // vt and history (renderer only), and the log recorder.
 type rtState struct {
 	sync.Mutex
-	buffer []byte
-	vt     vt10x.Terminal
-	width  int
-	height int
-	his    []block
-	log    *recorder
-	proc   *exec.Cmd
-	dirty  bool
-	first  bool
-	drain  bool
+	buffer    []byte
+	vt        vt10x.Terminal
+	width     int
+	height    int
+	his       []block
+	log       *recorder
+	proc      *exec.Cmd
+	dirty     bool
+	first     bool
+	drain     bool
+	finalCode int
 }
 
 func main() {
@@ -122,7 +130,13 @@ func main() {
 				wake()
 			}
 			if rerr != nil {
+				// EOF from the pty: the shell has exited. Reap it here so the
+				// final unfinished block can carry the shell's own exit code.
+				state, _ := cmd.Process.Wait()
 				rt.Lock()
+				if state != nil {
+					rt.finalCode = state.ExitCode()
+				}
 				rt.drain = true
 				rt.Unlock()
 				wake()
@@ -148,6 +162,7 @@ func main() {
 	}()
 
 	exit := false
+	code := 0
 	for !exit {
 		select {
 		case <-renderTick:
@@ -173,6 +188,7 @@ func main() {
 		}
 		rt.Lock()
 		done := rt.drain
+		code = rt.finalCode
 		rt.Unlock()
 		if done {
 			exit = true
@@ -182,11 +198,6 @@ func main() {
 	rt.log.event("exit")
 	rec.Close()
 	_ = master.Close()
-	state, _ := cmd.Process.Wait()
-	code := 0
-	if state != nil {
-		code = state.ExitCode()
-	}
 	fmt.Fprintf(os.Stderr, "sh exited with code %d\n", code)
 	restore()
 	os.Exit(code)
@@ -219,7 +230,7 @@ func (rt *rtState) tick() {
 	if rt.drain {
 		g, _, _ := rt.snapshot()
 		if g != nil {
-			rt.his = append(rt.his, block{cells: g, width: rt.width})
+			rt.his = append(rt.his, block{cells: g, width: rt.width, code: rt.finalCode})
 			rt.log.event("block " + itoa(len(rt.his)) + " (final)")
 			rt.dirty = true
 		}
