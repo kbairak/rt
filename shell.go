@@ -32,12 +32,14 @@ func detectMode(shell string) (string, error) {
 	switch {
 	case base == "zsh":
 		return modeZsh, nil
+	case base == "bash":
+		return modeBash, nil
 	case base == "sh":
 		return modeSh, nil
 	case base == "python" || base == "python3" || strings.HasPrefix(base, "python3."):
 		return modePython, nil
 	default:
-		return "", fmt.Errorf("unsupported shell %q: use --mode sh|zsh|python", shell)
+		return "", fmt.Errorf("unsupported shell %q: use --mode sh|zsh|bash|python", shell)
 	}
 }
 
@@ -45,10 +47,10 @@ func detectMode(shell string) (string, error) {
 func chooseMode(flagMode, shell string) (string, error) {
 	if flagMode != "" {
 		switch flagMode {
-		case modeSh, modeZsh, modePython:
+		case modeSh, modeZsh, modeBash, modePython:
 			return flagMode, nil
 		default:
-			return "", fmt.Errorf("unsupported mode %q: use --mode sh|zsh|python", flagMode)
+			return "", fmt.Errorf("unsupported mode %q: use --mode sh|zsh|bash|python", flagMode)
 		}
 	}
 	return detectMode(shell)
@@ -80,6 +82,8 @@ func getCmd(shell, mode string) (*exec.Cmd, func(), error) {
 	switch mode {
 	case modeZsh:
 		return zshCmd(shell)
+	case modeBash:
+		return bashCmd(shell)
 	case modeSh:
 		return shCmd(shell)
 	case modePython:
@@ -120,6 +124,58 @@ func shCmd(shell string) (*exec.Cmd, func(), error) {
 	realENV := os.Getenv("ENV")
 	cmd := exec.Command(shell)
 	cmd.Env = withEnv(os.Environ(), "ENV="+script.path, "RT_REAL_ENV="+realENV, "REVERSE_TERMINAL=1")
+	return cmd, script.cleanup, nil
+}
+
+// realBashrc is the user's real bash rc file. Bash has no environment override
+// for it, so the default for an interactive non-login shell is used.
+func realBashrc() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".bashrc")
+}
+
+// writeBashRc creates a temp rc file that sources the user's real ~/.bashrc,
+// then installs a PROMPT_COMMAND hook that prints the separator (with the last
+// command's status) before every prompt. PROMPT_COMMAND output is not part of
+// PS1, so the marker needs no \[...\] width wrapping. bash --rcfile replaces
+// ~/.bashrc for interactive non-login shells.
+func writeBashRc() (rcScript, error) {
+	dir, err := os.MkdirTemp("", "rt-*")
+	if err != nil {
+		return rcScript{}, err
+	}
+	path := filepath.Join(dir, "rc")
+	// Prepend so __rt_marker is the first hook and sees the true $?. Bash 5.1+
+	// allows PROMPT_COMMAND to be an array; handle both forms.
+	hook := "if [ -n \"$RT_REAL_BASHRC\" ] && [ -f \"$RT_REAL_BASHRC\" ]; then . \"$RT_REAL_BASHRC\"; fi\n" +
+		"__rt_marker() { printf '\\033]" + sepPayload + ";%d\\a' \"$?\"; }\n" +
+		"if [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == \"declare -a\"* ]]; then\n" +
+		"  PROMPT_COMMAND=(__rt_marker \"${PROMPT_COMMAND[@]}\")\n" +
+		"else\n" +
+		"  PROMPT_COMMAND=\"__rt_marker${PROMPT_COMMAND:+;$PROMPT_COMMAND}\"\n" +
+		"fi\n"
+	if werr := os.WriteFile(path, []byte(hook), 0o600); werr != nil {
+		_ = os.RemoveAll(dir)
+		return rcScript{}, werr
+	}
+	return rcScript{path: path, cleanup: func() { _ = os.RemoveAll(dir) }}, nil
+}
+
+// bashCmd runs bash interactively with --rcfile pointed at the generated rc,
+// preserving the user's real ~/.bashrc via RT_REAL_BASHRC.
+func bashCmd(shell string) (*exec.Cmd, func(), error) {
+	script, err := writeBashRc()
+	if err != nil {
+		return nil, nil, err
+	}
+	cmd := exec.Command(shell, "--rcfile", script.path, "-i")
+	cmd.Env = withEnv(os.Environ(),
+		"RT_REAL_BASHRC="+realBashrc(),
+		"REVERSE_TERMINAL=1",
+	)
 	return cmd, script.cleanup, nil
 }
 

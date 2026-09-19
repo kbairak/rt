@@ -23,6 +23,7 @@ const sepPayload = "RT;7f3a9b"
 const (
 	modeSh     = "sh"
 	modeZsh    = "zsh"
+	modeBash   = "bash"
 	modePython = "python"
 )
 
@@ -54,13 +55,13 @@ type block struct {
 // vt and history (renderer only), and the log recorder.
 type rtState struct {
 	sync.Mutex
-	buffer    []byte
-	vt        vt10x.Terminal
-	width     int
-	height    int
-	his       []block
-	log       *recorder
-	proc      *exec.Cmd
+	buffer      []byte
+	vt          vt10x.Terminal
+	width       int
+	height      int
+	his         []block
+	log         *recorder
+	proc        *exec.Cmd
 	dirty       bool
 	first       bool
 	drain       bool
@@ -73,10 +74,12 @@ func main() {
 	app := &cli.App{
 		Name:      "rt",
 		Usage:     "reverse-terminal: pin the shell prompt to the top",
-		ArgsUsage: "[shell]",
+		UsageText: "rt [options] [shell]",
 		Flags: []cli.Flag{
-			&cli.StringFlag{Name: "mode", Aliases: []string{"m"},
-				Usage: "shell mode: sh|zsh|python (default: inferred from shell)"},
+			&cli.StringFlag{
+				Name: "mode", Aliases: []string{"m"},
+				Usage: "shell mode: sh|zsh|bash|python (default: inferred from shell)",
+			},
 		},
 		Action: run,
 	}
@@ -101,7 +104,7 @@ func run(c *cli.Context) error {
 	}
 
 	interactive := term.IsTerminal(int(os.Stdin.Fd()))
-	var restore = func() {}
+	restore := func() {}
 	if interactive {
 		f, err := term.MakeRaw(int(os.Stdin.Fd()))
 		if err != nil {

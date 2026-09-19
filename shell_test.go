@@ -51,12 +51,14 @@ func TestDetectMode(t *testing.T) {
 		{"zsh login", "-zsh", modeZsh, false},
 		{"sh path", "/usr/bin/sh", modeSh, false},
 		{"sh bare", "sh", modeSh, false},
+		{"bash path", "/bin/bash", modeBash, false},
+		{"bash bare", "bash", modeBash, false},
+		{"bash login", "-bash", modeBash, false},
 		{"python3 path", "/usr/bin/python3", modePython, false},
 		{"python3 bare", "python3", modePython, false},
 		{"python3 versioned", "/usr/local/bin/python3.13", modePython, false},
 		{"python bare", "python", modePython, false},
 		{"python3-config unsupported", "/usr/bin/python3-config", "", true},
-		{"bash unsupported", "/bin/bash", "", true},
 		{"dash unsupported", "/bin/dash", "", true},
 	}
 	for _, c := range cases {
@@ -82,6 +84,8 @@ func TestChooseMode(t *testing.T) {
 	}{
 		{"explicit overrides shell", modeSh, "/bin/bash", modeSh, false},
 		{"empty infers", "", "/bin/zsh", modeZsh, false},
+		{"empty infers bash", "", "/bin/bash", modeBash, false},
+		{"explicit bash", modeBash, "/bin/sh", modeBash, false},
 		{"empty infers python", "", "/usr/bin/python3", modePython, false},
 		{"explicit python", modePython, "/bin/sh", modePython, false},
 		{"bad mode", "fish", "/bin/zsh", "", true},
@@ -195,6 +199,38 @@ func TestGetCmdZsh(t *testing.T) {
 	}
 }
 
+func TestGetCmdBash(t *testing.T) {
+	cmd, cleanup, err := getCmd("/bin/bash", modeBash)
+	if err != nil {
+		t.Fatalf("getCmd: %v", err)
+	}
+	if cmd.Args[0] != "/bin/bash" {
+		t.Fatalf("Args[0] = %q, want /bin/bash", cmd.Args[0])
+	}
+	if len(cmd.Args) < 4 || cmd.Args[1] != "--rcfile" || cmd.Args[3] != "-i" {
+		t.Fatalf("Args = %v, want --rcfile <path> -i", cmd.Args)
+	}
+	if v := envValue(cmd.Env, "RT_REAL_BASHRC"); v == "" {
+		t.Fatal("RT_REAL_BASHRC not set")
+	}
+	rcPath := cmd.Args[2]
+	b, err := os.ReadFile(rcPath)
+	if err != nil {
+		t.Fatalf("read rc: %v", err)
+	}
+	rc := string(b)
+	for _, want := range []string{sepPayload, "PROMPT_COMMAND", "$?", `"$RT_REAL_BASHRC"`} {
+		if !strings.Contains(rc, want) {
+			t.Fatalf("rc missing %q:\n%s", want, rc)
+		}
+	}
+	dir := filepath.Dir(rcPath)
+	cleanup()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("temp dir %s not removed: %v", dir, err)
+	}
+}
+
 func TestGetCmdPython(t *testing.T) {
 	t.Setenv("PYTHONSTARTUP", "/x/y")
 	cmd, cleanup, err := getCmd("/usr/bin/python3", modePython)
@@ -235,7 +271,7 @@ func TestGetCmdPython(t *testing.T) {
 }
 
 func TestGetCmdUnsupported(t *testing.T) {
-	if _, _, err := getCmd("/bin/bash", "bash"); err == nil {
+	if _, _, err := getCmd("/bin/dash", "dash"); err == nil {
 		t.Fatal("getCmd with unsupported mode: want error, got nil")
 	}
 }
