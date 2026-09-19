@@ -1,11 +1,26 @@
 package main
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/urfave/cli/v2"
 )
+
+// cliCtx builds a *cli.Context with an optional --mode value and positional
+// args, for exercising resolveShell/resolveMode without the real app.
+func cliCtx(t *testing.T, mode string, args ...string) *cli.Context {
+	t.Helper()
+	set := flag.NewFlagSet("test", flag.ContinueOnError)
+	set.String("mode", mode, "")
+	if err := set.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	return cli.NewContext(nil, set, nil)
+}
 
 // envValue returns the value of key in a KEY=VALUE env slice, or "".
 func envValue(env []string, key string) string {
@@ -32,7 +47,7 @@ func TestResolveShell(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv("SHELL", c.env)
-			if got := resolveShell(c.arg); got != c.want {
+			if got := resolveShell(cliCtx(t, "", c.arg)); got != c.want {
 				t.Fatalf("resolveShell(%q) = %q, want %q", c.arg, got, c.want)
 			}
 		})
@@ -74,7 +89,7 @@ func TestDetectMode(t *testing.T) {
 	}
 }
 
-func TestChooseMode(t *testing.T) {
+func TestResolveMode(t *testing.T) {
 	cases := []struct {
 		name     string
 		flagMode string
@@ -92,12 +107,12 @@ func TestChooseMode(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := chooseMode(c.flagMode, c.shell)
+			got, err := resolveMode(cliCtx(t, c.flagMode, c.shell))
 			if c.wantErr != (err != nil) {
-				t.Fatalf("chooseMode(%q,%q) err = %v, wantErr %v", c.flagMode, c.shell, err, c.wantErr)
+				t.Fatalf("resolveMode(%q,%q) err = %v, wantErr %v", c.flagMode, c.shell, err, c.wantErr)
 			}
 			if !c.wantErr && got != c.want {
-				t.Fatalf("chooseMode(%q,%q) = %q, want %q", c.flagMode, c.shell, got, c.want)
+				t.Fatalf("resolveMode(%q,%q) = %q, want %q", c.flagMode, c.shell, got, c.want)
 			}
 		})
 	}

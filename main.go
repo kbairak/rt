@@ -97,8 +97,8 @@ func run(c *cli.Context) error {
 		return cli.Exit("nested rt unsupported", 1)
 	}
 
-	shell := resolveShell(c.Args().First())
-	mode, err := chooseMode(c.String("mode"), shell)
+	shell := resolveShell(c)
+	mode, err := resolveMode(c)
 	if err != nil {
 		return err
 	}
