@@ -10,6 +10,7 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/hinshun/vt10x"
+	"github.com/urfave/cli/v2"
 	"golang.org/x/term"
 )
 
@@ -17,6 +18,12 @@ import (
 // the shell prompt. A user cannot type it, so accidental matches are
 // impossible.
 const sepPayload = "RT;7f3a9b"
+
+// Supported shell modes.
+const (
+	modeSh  = "sh"
+	modeZsh = "zsh"
+)
 
 // sepHead opens the zero-width prompt marker; the shell appends the last
 // command's exit code (digits) then sepEnd (BEL). A user cannot type it, so
@@ -62,17 +69,42 @@ type rtState struct {
 }
 
 func main() {
-	if os.Getenv("REVERSE_TERMINAL") != "" {
-		fmt.Fprintln(os.Stderr, "nested rt unsupported")
+	app := &cli.App{
+		Name:      "rt",
+		Usage:     "reverse-terminal: pin the shell prompt to the top",
+		ArgsUsage: "[shell]",
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "mode", Aliases: []string{"m"},
+				Usage: "shell mode: sh|zsh (default: inferred from shell)"},
+		},
+		Action: run,
+	}
+	if err := app.Run(os.Args); err != nil {
+		if ec, ok := err.(cli.ExitCoder); ok {
+			os.Exit(ec.ExitCode())
+		}
+		fmt.Fprintln(os.Stderr, "rt:", err)
 		os.Exit(1)
 	}
+}
+
+func run(c *cli.Context) error {
+	if os.Getenv("REVERSE_TERMINAL") != "" {
+		return cli.Exit("nested rt unsupported", 1)
+	}
+
+	shell := resolveShell(c.Args().First())
+	mode, err := chooseMode(c.String("mode"), shell)
+	if err != nil {
+		return err
+	}
+
 	interactive := term.IsTerminal(int(os.Stdin.Fd()))
 	var restore = func() {}
 	if interactive {
 		f, err := term.MakeRaw(int(os.Stdin.Fd()))
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "raw: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("raw: %w", err)
 		}
 		restore = func() {
 			os.Stdout.WriteString("\x1b[?25h\x1b[0m")
@@ -88,23 +120,18 @@ func main() {
 
 	rec, err := newRecorder()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "recorder:", err)
-		os.Exit(1)
+		return fmt.Errorf("recorder: %w", err)
 	}
 
-	script, err := writeRcScript()
+	cmd, cleanup, err := getCmd(shell, mode)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "rc:", err)
-		os.Exit(1)
+		return fmt.Errorf("rc: %w", err)
 	}
-	defer script.cleanup()
+	defer cleanup()
 
-	cmd := exec.Command("sh")
-	cmd.Env = append(os.Environ(), "ENV="+script.path, "REVERSE_TERMINAL=1")
 	master, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "pty:", err)
-		os.Exit(1)
+		return fmt.Errorf("pty: %w", err)
 	}
 
 	rt := &rtState{
@@ -225,9 +252,8 @@ func main() {
 	rt.log.event("exit")
 	rec.Close()
 	_ = master.Close()
-	fmt.Fprintf(os.Stderr, "sh exited with code %d\n", code)
-	restore()
-	os.Exit(code)
+	fmt.Fprintf(os.Stderr, "%s (%s) exited with code %d\n", shell, mode, code)
+	return cli.Exit("", code)
 }
 
 func termSize(f *os.File) (w, h int) {

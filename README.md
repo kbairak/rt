@@ -91,10 +91,10 @@ blocks. The rendering must handle terminal resize events gracefully.
 
 - Variables:
   - buffer: buffer of bytes
-  - vt: vt instance
+  - vt: vt10x instance
   - history: slice of blocks, blocks are stripped vt10x grids
   - width, height: dimensions of the terminal
-- We set raw+altscreen
+- We set raw mode on the terminal
 - Create log file with timestamp in name
 - We add the PS1 stuff in a temporary rc file and load sh with the temp file as its only configuration
 - We open a pty with sh
@@ -161,14 +161,14 @@ Notes:
   - [x] When swallowed: clear `rt.his`, repaint, do NOT forward to child
 - [x] Block invoking rt from rt
   - [x] Outer rt sets env var (e.g. `RT=1`) on the pty child next to `ENV=`; inner rt checks `os.Environ()` at startup, prints "nested rt unsupported", exits. Do NOT match on command name (aliases/full paths cloak it)
-- [ ] separator logic per shell
-  - [ ] Shell is `args[1] || $SHELL`
-  - [ ] Try to figure out which shell it is (eg '/bin/zsh' -> 'zsh')
-  - [ ] User can override with `--mode` flag
-  - [ ] Interactive rc path differs: zsh -> `ZDOTDIR`, bash -> `~/.bashrc` (BASH_ENV is non-interactive only), fish -> `XDG_CONFIG_HOME`
-  - [ ] Apply separator hook LAST; user rc may overwrite PS1. zsh: precmd hook preferred over PS1 injection
-  - [ ] Marker must be prompt-width-safe: zsh `%{...%}`, bash `\[...\]`; bare OSC miscalculates width
-  - [ ] Implement zsh first (user shell), keep sh fallback
+- [x] separator logic per shell
+  - [x] Shell is `args[1] || $SHELL`
+  - [x] Try to figure out which shell it is (eg '/bin/zsh' -> 'zsh')
+  - [x] User can override with `--mode` flag
+  - [x] Interactive rc path differs: zsh -> `ZDOTDIR`, bash -> `~/.bashrc` (BASH_ENV is non-interactive only), fish -> `XDG_CONFIG_HOME`
+  - [x] Apply separator hook LAST; user rc may overwrite PS1. zsh: precmd hook preferred over PS1 injection
+  - [x] Marker must be prompt-width-safe: zsh `%{...%}`, bash `\[...\]`; bare OSC miscalculates width
+  - [x] Implement zsh first (user shell), keep sh fallback
 - [x] fullscreen apps: option 1 ("do nothing") works — vt sized to stdin, alt-screen emulated by vt10x, live grid fills the rows so history stays cropped below. VERIFIED: nvim, bat pager
   - [ ] Partial-height apps (pagers) already let history peek under the live grid — accept as feature
   - [ ] fullscreen apps with side-by-side history: intercept alt-screen (`\x1b[?1049h/l`) from pty; if set, render live grid left 70% of stdin width and a strip of recent history blocks on the right. Pane-split renderer, not a width tweak
@@ -176,3 +176,4 @@ Notes:
 - [ ] History scroll from prompt: PgUp/PgDn (or C-b/C-f) at idle prompt pans the block list. Gate on `inAltScreen`
 - [ ] Repaint perf debt: `\x1b[2J` + full redraw every tick; nvim/htop-class apps tear and burn CPU. Compute cell diff between frames, emit changed rows only
 - [ ] Terminal query caps (document, don't fix yet): vt10x ignores DA1/`\x1b[c`, OSC 10/11 dynamic colors, cursor-shape demand; apps fall back to 256-color
+- [ ] Deny to run 'rt' if not in "real" terminal

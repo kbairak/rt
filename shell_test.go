@@ -1,0 +1,195 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// envValue returns the value of key in a KEY=VALUE env slice, or "".
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			return e[len(prefix):]
+		}
+	}
+	return ""
+}
+
+func TestResolveShell(t *testing.T) {
+	cases := []struct {
+		name string
+		arg  string
+		env  string
+		want string
+	}{
+		{"explicit arg wins", "/bin/zsh", "/bin/sh", "/bin/zsh"},
+		{"env fallback", "", "/bin/zsh", "/bin/zsh"},
+		{"both empty", "", "", "sh"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("SHELL", c.env)
+			if got := resolveShell(c.arg); got != c.want {
+				t.Fatalf("resolveShell(%q) = %q, want %q", c.arg, got, c.want)
+			}
+		})
+	}
+}
+
+func TestDetectMode(t *testing.T) {
+	cases := []struct {
+		name    string
+		shell   string
+		want    string
+		wantErr bool
+	}{
+		{"zsh path", "/bin/zsh", modeZsh, false},
+		{"zsh bare", "zsh", modeZsh, false},
+		{"zsh login", "-zsh", modeZsh, false},
+		{"sh path", "/usr/bin/sh", modeSh, false},
+		{"sh bare", "sh", modeSh, false},
+		{"bash unsupported", "/bin/bash", "", true},
+		{"dash unsupported", "/bin/dash", "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := detectMode(c.shell)
+			if c.wantErr != (err != nil) {
+				t.Fatalf("detectMode(%q) err = %v, wantErr %v", c.shell, err, c.wantErr)
+			}
+			if !c.wantErr && got != c.want {
+				t.Fatalf("detectMode(%q) = %q, want %q", c.shell, got, c.want)
+			}
+		})
+	}
+}
+
+func TestChooseMode(t *testing.T) {
+	cases := []struct {
+		name     string
+		flagMode string
+		shell    string
+		want     string
+		wantErr  bool
+	}{
+		{"explicit overrides shell", modeSh, "/bin/bash", modeSh, false},
+		{"empty infers", "", "/bin/zsh", modeZsh, false},
+		{"bad mode", "fish", "/bin/zsh", "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := chooseMode(c.flagMode, c.shell)
+			if c.wantErr != (err != nil) {
+				t.Fatalf("chooseMode(%q,%q) err = %v, wantErr %v", c.flagMode, c.shell, err, c.wantErr)
+			}
+			if !c.wantErr && got != c.want {
+				t.Fatalf("chooseMode(%q,%q) = %q, want %q", c.flagMode, c.shell, got, c.want)
+			}
+		})
+	}
+}
+
+func TestWithEnv(t *testing.T) {
+	base := []string{"ZDOTDIR=old", "PATH=/usr/bin", "HOME=/home/u"}
+	got := withEnv(base, "ZDOTDIR=new")
+
+	count := 0
+	for _, e := range got {
+		if strings.HasPrefix(e, "ZDOTDIR=") {
+			count++
+			if e != "ZDOTDIR=new" {
+				t.Fatalf("ZDOTDIR = %q, want new", e)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("ZDOTDIR appears %d times, want 1", count)
+	}
+	if v := envValue(got, "PATH"); v != "/usr/bin" {
+		t.Fatalf("PATH = %q, want untouched", v)
+	}
+	if v := envValue(got, "HOME"); v != "/home/u" {
+		t.Fatalf("HOME = %q, want untouched", v)
+	}
+}
+
+func TestGetCmdSh(t *testing.T) {
+	t.Setenv("ENV", "/x/y")
+	cmd, cleanup, err := getCmd("/bin/sh", modeSh)
+	if err != nil {
+		t.Fatalf("getCmd: %v", err)
+	}
+	if cmd.Args[0] != "/bin/sh" {
+		t.Fatalf("Args[0] = %q, want /bin/sh", cmd.Args[0])
+	}
+	if v := envValue(cmd.Env, "RT_REAL_ENV"); v != "/x/y" {
+		t.Fatalf("RT_REAL_ENV = %q, want /x/y", v)
+	}
+	envPath := envValue(cmd.Env, "ENV")
+	if envPath == "" {
+		t.Fatal("ENV not set")
+	}
+	b, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("read rc: %v", err)
+	}
+	rc := string(b)
+	for _, want := range []string{sepPayload, "$?", `. "$RT_REAL_ENV"`} {
+		if !strings.Contains(rc, want) {
+			t.Fatalf("rc missing %q:\n%s", want, rc)
+		}
+	}
+	dir := filepath.Dir(envPath)
+	cleanup()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("temp dir %s not removed: %v", dir, err)
+	}
+}
+
+func TestGetCmdZsh(t *testing.T) {
+	cmd, cleanup, err := getCmd("/bin/zsh", modeZsh)
+	if err != nil {
+		t.Fatalf("getCmd: %v", err)
+	}
+	if cmd.Args[0] != "/bin/zsh" {
+		t.Fatalf("Args[0] = %q, want /bin/zsh", cmd.Args[0])
+	}
+	if len(cmd.Args) < 2 || cmd.Args[1] != "-i" {
+		t.Fatalf("Args = %v, want second arg -i", cmd.Args)
+	}
+	if v := envValue(cmd.Env, "RT_REAL_ZDOTDIR"); v == "" {
+		t.Fatal("RT_REAL_ZDOTDIR not set")
+	}
+	dir := envValue(cmd.Env, "ZDOTDIR")
+	if dir == "" {
+		t.Fatal("ZDOTDIR not set")
+	}
+	for _, name := range []string{".zshrc", ".zshenv"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	b, err := os.ReadFile(filepath.Join(dir, ".zshrc"))
+	if err != nil {
+		t.Fatalf("read .zshrc: %v", err)
+	}
+	rc := string(b)
+	for _, want := range []string{"precmd_functions", sepPayload} {
+		if !strings.Contains(rc, want) {
+			t.Fatalf(".zshrc missing %q:\n%s", want, rc)
+		}
+	}
+	cleanup()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("temp dir %s not removed: %v", dir, err)
+	}
+}
+
+func TestGetCmdUnsupported(t *testing.T) {
+	if _, _, err := getCmd("/bin/bash", "bash"); err == nil {
+		t.Fatal("getCmd with unsupported mode: want error, got nil")
+	}
+}

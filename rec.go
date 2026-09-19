@@ -40,7 +40,7 @@ func (r *recorder) Close() {
 func (r *recorder) event(what string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	fmt.Fprintf(r.w, "%7.1fms --                 EVENT     %s\n", msSince(r.init), what)
+	fmt.Fprintf(r.w, "%7.1fms --           EVENT     %s\n", msSince(r.init), what)
 }
 
 // tx logs host-stdin bytes forwarded into the pty.
