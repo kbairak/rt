@@ -51,6 +51,11 @@ func TestDetectMode(t *testing.T) {
 		{"zsh login", "-zsh", modeZsh, false},
 		{"sh path", "/usr/bin/sh", modeSh, false},
 		{"sh bare", "sh", modeSh, false},
+		{"python3 path", "/usr/bin/python3", modePython, false},
+		{"python3 bare", "python3", modePython, false},
+		{"python3 versioned", "/usr/local/bin/python3.13", modePython, false},
+		{"python bare", "python", modePython, false},
+		{"python3-config unsupported", "/usr/bin/python3-config", "", true},
 		{"bash unsupported", "/bin/bash", "", true},
 		{"dash unsupported", "/bin/dash", "", true},
 	}
@@ -77,6 +82,8 @@ func TestChooseMode(t *testing.T) {
 	}{
 		{"explicit overrides shell", modeSh, "/bin/bash", modeSh, false},
 		{"empty infers", "", "/bin/zsh", modeZsh, false},
+		{"empty infers python", "", "/usr/bin/python3", modePython, false},
+		{"explicit python", modePython, "/bin/sh", modePython, false},
 		{"bad mode", "fish", "/bin/zsh", "", true},
 	}
 	for _, c := range cases {
@@ -182,6 +189,45 @@ func TestGetCmdZsh(t *testing.T) {
 			t.Fatalf(".zshrc missing %q:\n%s", want, rc)
 		}
 	}
+	cleanup()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("temp dir %s not removed: %v", dir, err)
+	}
+}
+
+func TestGetCmdPython(t *testing.T) {
+	t.Setenv("PYTHONSTARTUP", "/x/y")
+	cmd, cleanup, err := getCmd("/usr/bin/python3", modePython)
+	if err != nil {
+		t.Fatalf("getCmd: %v", err)
+	}
+	if cmd.Args[0] != "/usr/bin/python3" {
+		t.Fatalf("Args[0] = %q, want /usr/bin/python3", cmd.Args[0])
+	}
+	if len(cmd.Args) < 2 || cmd.Args[1] != "-i" {
+		t.Fatalf("Args = %v, want second arg -i", cmd.Args)
+	}
+	if v := envValue(cmd.Env, "RT_REAL_PYTHONSTARTUP"); v != "/x/y" {
+		t.Fatalf("RT_REAL_PYTHONSTARTUP = %q, want /x/y", v)
+	}
+	if v := envValue(cmd.Env, "PYTHON_BASIC_REPL"); v != "1" {
+		t.Fatalf("PYTHON_BASIC_REPL = %q, want 1", v)
+	}
+	startupPath := envValue(cmd.Env, "PYTHONSTARTUP")
+	if startupPath == "" {
+		t.Fatal("PYTHONSTARTUP not set")
+	}
+	b, err := os.ReadFile(startupPath)
+	if err != nil {
+		t.Fatalf("read startup: %v", err)
+	}
+	startup := string(b)
+	for _, want := range []string{sepPayload, "_RtPrompt", "sys.excepthook", "RT_REAL_PYTHONSTARTUP"} {
+		if !strings.Contains(startup, want) {
+			t.Fatalf("startup missing %q:\n%s", want, startup)
+		}
+	}
+	dir := filepath.Dir(startupPath)
 	cleanup()
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("temp dir %s not removed: %v", dir, err)

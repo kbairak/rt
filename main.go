@@ -21,8 +21,9 @@ const sepPayload = "RT;7f3a9b"
 
 // Supported shell modes.
 const (
-	modeSh  = "sh"
-	modeZsh = "zsh"
+	modeSh     = "sh"
+	modeZsh    = "zsh"
+	modePython = "python"
 )
 
 // sepHead opens the zero-width prompt marker; the shell appends the last
@@ -75,7 +76,7 @@ func main() {
 		ArgsUsage: "[shell]",
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "mode", Aliases: []string{"m"},
-				Usage: "shell mode: sh|zsh (default: inferred from shell)"},
+				Usage: "shell mode: sh|zsh|python (default: inferred from shell)"},
 		},
 		Action: run,
 	}
