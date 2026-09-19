@@ -1,11 +1,26 @@
 package main
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/urfave/cli/v2"
 )
+
+// cliCtx builds a *cli.Context with an optional --mode value and positional
+// args, for exercising resolveShell/resolveMode without the real app.
+func cliCtx(t *testing.T, mode string, args ...string) *cli.Context {
+	t.Helper()
+	set := flag.NewFlagSet("test", flag.ContinueOnError)
+	set.String("mode", mode, "")
+	if err := set.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	return cli.NewContext(nil, set, nil)
+}
 
 // envValue returns the value of key in a KEY=VALUE env slice, or "".
 func envValue(env []string, key string) string {
@@ -32,7 +47,7 @@ func TestResolveShell(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv("SHELL", c.env)
-			if got := resolveShell(c.arg); got != c.want {
+			if got := resolveShell(cliCtx(t, "", c.arg)); got != c.want {
 				t.Fatalf("resolveShell(%q) = %q, want %q", c.arg, got, c.want)
 			}
 		})
@@ -46,18 +61,18 @@ func TestDetectMode(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{"zsh path", "/bin/zsh", modeZsh, false},
-		{"zsh bare", "zsh", modeZsh, false},
-		{"zsh login", "-zsh", modeZsh, false},
-		{"sh path", "/usr/bin/sh", modeSh, false},
-		{"sh bare", "sh", modeSh, false},
-		{"bash path", "/bin/bash", modeBash, false},
-		{"bash bare", "bash", modeBash, false},
-		{"bash login", "-bash", modeBash, false},
-		{"python3 path", "/usr/bin/python3", modePython, false},
-		{"python3 bare", "python3", modePython, false},
-		{"python3 versioned", "/usr/local/bin/python3.13", modePython, false},
-		{"python bare", "python", modePython, false},
+		{"zsh path", "/bin/zsh", "zsh", false},
+		{"zsh bare", "zsh", "zsh", false},
+		{"zsh login", "-zsh", "zsh", false},
+		{"sh path", "/usr/bin/sh", "sh", false},
+		{"sh bare", "sh", "sh", false},
+		{"bash path", "/bin/bash", "bash", false},
+		{"bash bare", "bash", "bash", false},
+		{"bash login", "-bash", "bash", false},
+		{"python3 path", "/usr/bin/python3", "python", false},
+		{"python3 bare", "python3", "python", false},
+		{"python3 versioned", "/usr/local/bin/python3.13", "python", false},
+		{"python bare", "python", "python", false},
 		{"python3-config unsupported", "/usr/bin/python3-config", "", true},
 		{"dash unsupported", "/bin/dash", "", true},
 	}
@@ -74,7 +89,7 @@ func TestDetectMode(t *testing.T) {
 	}
 }
 
-func TestChooseMode(t *testing.T) {
+func TestResolveMode(t *testing.T) {
 	cases := []struct {
 		name     string
 		flagMode string
@@ -82,22 +97,22 @@ func TestChooseMode(t *testing.T) {
 		want     string
 		wantErr  bool
 	}{
-		{"explicit overrides shell", modeSh, "/bin/bash", modeSh, false},
-		{"empty infers", "", "/bin/zsh", modeZsh, false},
-		{"empty infers bash", "", "/bin/bash", modeBash, false},
-		{"explicit bash", modeBash, "/bin/sh", modeBash, false},
-		{"empty infers python", "", "/usr/bin/python3", modePython, false},
-		{"explicit python", modePython, "/bin/sh", modePython, false},
+		{"explicit overrides shell", "sh", "/bin/bash", "sh", false},
+		{"empty infers", "", "/bin/zsh", "zsh", false},
+		{"empty infers bash", "", "/bin/bash", "bash", false},
+		{"explicit bash", "bash", "/bin/sh", "bash", false},
+		{"empty infers python", "", "/usr/bin/python3", "python", false},
+		{"explicit python", "python", "/bin/sh", "python", false},
 		{"bad mode", "fish", "/bin/zsh", "", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := chooseMode(c.flagMode, c.shell)
+			got, err := resolveMode(cliCtx(t, c.flagMode, c.shell))
 			if c.wantErr != (err != nil) {
-				t.Fatalf("chooseMode(%q,%q) err = %v, wantErr %v", c.flagMode, c.shell, err, c.wantErr)
+				t.Fatalf("resolveMode(%q,%q) err = %v, wantErr %v", c.flagMode, c.shell, err, c.wantErr)
 			}
 			if !c.wantErr && got != c.want {
-				t.Fatalf("chooseMode(%q,%q) = %q, want %q", c.flagMode, c.shell, got, c.want)
+				t.Fatalf("resolveMode(%q,%q) = %q, want %q", c.flagMode, c.shell, got, c.want)
 			}
 		})
 	}
@@ -129,7 +144,7 @@ func TestWithEnv(t *testing.T) {
 
 func TestGetCmdSh(t *testing.T) {
 	t.Setenv("ENV", "/x/y")
-	cmd, cleanup, err := getCmd("/bin/sh", modeSh)
+	cmd, cleanup, err := getCmd("/bin/sh", "sh")
 	if err != nil {
 		t.Fatalf("getCmd: %v", err)
 	}
@@ -148,7 +163,7 @@ func TestGetCmdSh(t *testing.T) {
 		t.Fatalf("read rc: %v", err)
 	}
 	rc := string(b)
-	for _, want := range []string{sepPayload, "$?", `. "$RT_REAL_ENV"`} {
+	for _, want := range []string{ansiRtPayload, "$?", `. "$RT_REAL_ENV"`} {
 		if !strings.Contains(rc, want) {
 			t.Fatalf("rc missing %q:\n%s", want, rc)
 		}
@@ -161,7 +176,7 @@ func TestGetCmdSh(t *testing.T) {
 }
 
 func TestGetCmdZsh(t *testing.T) {
-	cmd, cleanup, err := getCmd("/bin/zsh", modeZsh)
+	cmd, cleanup, err := getCmd("/bin/zsh", "zsh")
 	if err != nil {
 		t.Fatalf("getCmd: %v", err)
 	}
@@ -188,7 +203,7 @@ func TestGetCmdZsh(t *testing.T) {
 		t.Fatalf("read .zshrc: %v", err)
 	}
 	rc := string(b)
-	for _, want := range []string{"precmd_functions", sepPayload} {
+	for _, want := range []string{"precmd_functions", ansiRtPayload} {
 		if !strings.Contains(rc, want) {
 			t.Fatalf(".zshrc missing %q:\n%s", want, rc)
 		}
@@ -200,7 +215,7 @@ func TestGetCmdZsh(t *testing.T) {
 }
 
 func TestGetCmdBash(t *testing.T) {
-	cmd, cleanup, err := getCmd("/bin/bash", modeBash)
+	cmd, cleanup, err := getCmd("/bin/bash", "bash")
 	if err != nil {
 		t.Fatalf("getCmd: %v", err)
 	}
@@ -219,7 +234,7 @@ func TestGetCmdBash(t *testing.T) {
 		t.Fatalf("read rc: %v", err)
 	}
 	rc := string(b)
-	for _, want := range []string{sepPayload, "PROMPT_COMMAND", "$?", `"$RT_REAL_BASHRC"`} {
+	for _, want := range []string{ansiRtPayload, "PROMPT_COMMAND", "$?", `"$RT_REAL_BASHRC"`} {
 		if !strings.Contains(rc, want) {
 			t.Fatalf("rc missing %q:\n%s", want, rc)
 		}
@@ -233,7 +248,7 @@ func TestGetCmdBash(t *testing.T) {
 
 func TestGetCmdPython(t *testing.T) {
 	t.Setenv("PYTHONSTARTUP", "/x/y")
-	cmd, cleanup, err := getCmd("/usr/bin/python3", modePython)
+	cmd, cleanup, err := getCmd("/usr/bin/python3", "python")
 	if err != nil {
 		t.Fatalf("getCmd: %v", err)
 	}
@@ -258,7 +273,7 @@ func TestGetCmdPython(t *testing.T) {
 		t.Fatalf("read startup: %v", err)
 	}
 	startup := string(b)
-	for _, want := range []string{sepPayload, "_RtPrompt", "sys.excepthook", "RT_REAL_PYTHONSTARTUP"} {
+	for _, want := range []string{ansiRtPayload, "_RtPrompt", "sys.excepthook", "RT_REAL_PYTHONSTARTUP"} {
 		if !strings.Contains(startup, want) {
 			t.Fatalf("startup missing %q:\n%s", want, startup)
 		}

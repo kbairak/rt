@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -59,6 +60,17 @@ func (r *recorder) rx(b []byte) {
 	start := r.rxN + 1
 	r.rxN += len(b)
 	r.classify("rx", b, start)
+}
+
+// block logs a finished block's plain-text content, indented so it stands apart
+// from the TX/RX/EVENT lines.
+func (r *recorder) block(i int, text string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	fmt.Fprintf(r.w, "%7.1fms --           BLOCK     #%d\n", msSince(r.init), i)
+	for _, ln := range strings.Split(text, "\n") {
+		fmt.Fprintf(r.w, "%7.1fms --           BLOCK     | %s\n", msSince(r.init), ln)
+	}
 }
 
 // classify splits data into TEXT / ASCII / ANSI / MULTIBYTE runs and writes
@@ -124,7 +136,7 @@ func label(b byte) string {
 		return "CR"
 	case '\n':
 		return "LF"
-	case '\x1b':
+	case ansiEsc:
 		return "ESC"
 	case '\t':
 		return "TAB"

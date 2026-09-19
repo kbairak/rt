@@ -5,60 +5,58 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
-	"os"
 	"strings"
-	"sync"
 
 	"github.com/hinshun/vt10x"
 )
 
 // Glyph attribute bits (vt10x private constants, mirrored).
 
-// compose feeds a buffer chunk into rt, splitting finished commands at the
-// prompt marker: bytes before a marker are rendered, snapshotted into history
-// with the command's exit code, then the emulator is reset for the next
-// command.
-func (rt *rtState) compose(data []byte) {
+// composeChunk feeds a buffer chunk into vt, splitting finished commands at the
+// prompt marker: bytes before a marker are rendered, the boundary callback runs
+// with the command's exit code, then the emulator is reset for the next command.
+// Bytes that may be a split marker head are returned to be re-buffered.
+func composeChunk(vtp *vt10x.Terminal, data []byte, boundary func(code int)) []byte {
 	for len(data) > 0 {
-		hi := bytes.Index(data, sepHead)
+		hi := bytes.Index(data, ansiSepHead)
 		if hi < 0 {
-			// no marker head; the holdReader already guarantees no head
+			// no marker head; holdIter already guarantees no head
 			// fragment trails the chunk
-			_, _ = rt.vt.Write(data)
-			return
+			_, _ = (*vtp).Write(data)
+			return nil
 		}
-		rest := data[hi+len(sepHead):]
+		rest := data[hi+len(ansiSepHead):]
 		j := 0
 		for j < len(rest) && rest[j] >= '0' && rest[j] <= '9' {
 			j++
 		}
-		if j < len(rest) && rest[j] == sepEnd {
+		if j < len(rest) && rest[j] == ansiSepEnd {
 			// complete marker: command ended, exit code in rest[:j]
 			if hi > 0 {
-				_, _ = rt.vt.Write(data[:hi])
+				_, _ = (*vtp).Write(data[:hi])
 			}
 			code, _ := parseInt(string(rest[:j]))
-			rt.boundary(code)
+			boundary(code)
 			data = rest[j+1:]
 			continue
 		}
 		if j >= len(rest) {
 			// marker head (and maybe digits) split across chunks; wait
 			if hi > 0 {
-				_, _ = rt.vt.Write(data[:hi])
+				_, _ = (*vtp).Write(data[:hi])
 			}
-			rt.buffer = append(rt.buffer, data[hi:]...)
-			return
+			return append([]byte(nil), data[hi:]...)
 		}
 		// head followed by a non-digit, non-BEL byte: not a real marker
 		if hi+1 < len(data) {
-			_, _ = rt.vt.Write(data[:hi+1])
+			_, _ = (*vtp).Write(data[:hi+1])
 			data = data[hi+1:]
 		} else {
-			_, _ = rt.vt.Write(data)
-			return
+			_, _ = (*vtp).Write(data)
+			return nil
 		}
 	}
+	return nil
 }
 
 // trackAltScreen sets *inAlt from complete DEC 1049 enter/leave sequences in
@@ -67,12 +65,12 @@ func (rt *rtState) compose(data []byte) {
 func trackAltScreen(data []byte, inAlt *bool) {
 	from := 0
 	for {
-		j := bytes.Index(data[from:], []byte(altPrefixHeader))
+		j := bytes.Index(data[from:], []byte(ansiAltPrefix))
 		if j < 0 {
 			return
 		}
 		j += from
-		k := j + len(altPrefixHeader)
+		k := j + len(ansiAltPrefix)
 		if k >= len(data) {
 			return
 		}
@@ -86,10 +84,11 @@ func trackAltScreen(data []byte, inAlt *bool) {
 	}
 }
 
-// swallowCtrlL intercepts a pure CTRL-l read at the idle rt prompt: history is
-// cleared instead of forwarding the byte to the shell. Never fires on pastes
-// or mixed reads, mid-command output, the bootstrap prompt, or fullscreen apps.
-func (rt *rtState) swallowCtrlL(data []byte) bool {
+// swallowCtrlL reports whether a pure CTRL-l read at the idle rt prompt should
+// be intercepted: history is cleared instead of forwarding the byte to the
+// shell. Never fires on pastes or mixed reads, mid-command output, the
+// bootstrap prompt, or fullscreen apps.
+func swallowCtrlL(data, buffer []byte, first, inAltScreen bool) bool {
 	if len(data) == 0 {
 		return false
 	}
@@ -98,13 +97,7 @@ func (rt *rtState) swallowCtrlL(data []byte) bool {
 			return false
 		}
 	}
-	rt.Lock()
-	defer rt.Unlock()
-	if len(rt.buffer) != 0 || rt.first || rt.inAltScreen {
-		return false
-	}
-	rt.clearReq = true
-	return true
+	return len(buffer) == 0 && !first && !inAltScreen
 }
 
 // boundary runs when a prompt marker arrives: the just-finished command's grid
@@ -170,25 +163,9 @@ func blocksEqual(a, b block) bool {
 	return true
 }
 
-func (rt *rtState) boundary(code int) {
-	rt.log.event("sep")
-	rt.dirty = true
-	if !rt.first {
-		g, _, _ := rt.snapshot()
-		if g != nil {
-			rt.his = append(rt.his, newBlock(g, rt.width, code))
-			rt.log.event("block " + itoa(len(rt.his)))
-		}
-	} else {
-		rt.first = false
-	}
-	rt.vt = vt10x.New(vt10x.WithSize(rt.width, rt.height))
-}
-
-// snapshot copies the emulator grid, trimming trailing empty rows, and
+// snapshotGrid copies the emulator grid, trimming trailing empty rows, and
 // returns it plus the cursor position. Returns nil grid if nothing painted.
-func (rt *rtState) snapshot() ([][]vt10x.Glyph, int, int) {
-	vt := rt.vt
+func snapshotGrid(vt vt10x.Terminal) ([][]vt10x.Glyph, int, int) {
 	vt.Lock()
 	defer vt.Unlock()
 	cols, rows := vt.Size()
@@ -218,19 +195,23 @@ func (rt *rtState) snapshot() ([][]vt10x.Glyph, int, int) {
 	return grid[:last+1], cx, cy
 }
 
-// repaint draws the full frame: live emulator grid, then history blocks
-// newest-first with a header row, cropped to terminal height.
-func (rt *rtState) repaint() {
+// renderFrame builds the full frame: hide cursor, clear, draw the live
+// emulator grid, then history blocks newest-first with a header row, cropped to
+// terminal height, and plant the cursor at the live emulator cursor.
+func renderFrame(his []block, vt vt10x.Terminal, width, height int) []byte {
 	var frame bytes.Buffer
-	rows, cols := rt.height, rt.width
+	rows, cols := height, width
 
-	grid, cx, cy := rt.snapshot()
+	grid, cx, cy := snapshotGrid(vt)
+
+	// hide cursor, clear screen
+	frame.WriteString(ansiHideCursor + ansiClearScreen)
 
 	var line bytes.Buffer
 	grow := func(y int, row []vt10x.Glyph, width int) {
 		line.Reset()
 		cellRow(&line, row, width)
-		fmt.Fprintf(&frame, "%s%s", cursorPos(y, 0), line.Bytes())
+		fmt.Fprintf(&frame, "%s%s", ansiCursorPos(y, 0), line.Bytes())
 	}
 
 	y := 0
@@ -244,17 +225,17 @@ func (rt *rtState) repaint() {
 		}
 	}
 
-	for k := len(rt.his) - 1; k >= 0; k-- {
+	for k := len(his) - 1; k >= 0; k-- {
 		if y >= rows {
 			break
 		}
-		b := rt.his[k]
+		b := his[k]
 		rep := 1
-		for j := k - 1; j >= 0 && blocksEqual(b, rt.his[j]); j-- {
+		for j := k - 1; j >= 0 && blocksEqual(b, his[j]); j-- {
 			rep++
 		}
 		k -= rep - 1 // skip the older, now-collapsed duplicates
-		fmt.Fprintf(&frame, "%s%s", cursorPos(y, 0), sepText(rep, b.code, cols))
+		fmt.Fprintf(&frame, "%s%s", ansiCursorPos(y, 0), sepText(rep, b.code, cols))
 		y++
 		for r := 0; r < len(b.cells); r++ {
 			if y >= rows {
@@ -269,10 +250,9 @@ func (rt *rtState) repaint() {
 		}
 	}
 
-	// clear, draw, plant cursor at the live emulator cursor
-	os.Stdout.WriteString("\x1b[?25l\x1b[H\x1b[2J")
-	os.Stdout.Write(frame.Bytes())
-	os.Stdout.WriteString(cursorPos(cy, cx) + "\x1b[?25h")
+	// plant cursor at the live emulator cursor, show it
+	frame.WriteString(ansiCursorPos(cy, cx) + ansiShowCursor)
+	return frame.Bytes()
 }
 
 const (
@@ -289,7 +269,7 @@ func cellRow(buf *bytes.Buffer, row []vt10x.Glyph, width int) {
 	for x := 0; x < width && x < len(row); x++ {
 		g := row[x]
 		if first || g.FG != last.FG || g.BG != last.BG || g.Mode != last.Mode {
-			buf.WriteString(sgr(g))
+			buf.WriteString(ansiSgr(g))
 			last = g
 			first = false
 		}
@@ -299,62 +279,7 @@ func cellRow(buf *bytes.Buffer, row []vt10x.Glyph, width int) {
 		}
 		buf.WriteRune(c)
 	}
-	buf.WriteString("\x1b[0m")
-}
-
-func sgr(g vt10x.Glyph) string {
-	var parts []string
-	parts = append(parts, "0")
-	if g.Mode&attrBold != 0 {
-		parts = append(parts, "1")
-	}
-	if g.Mode&attrUnderline != 0 {
-		parts = append(parts, "4")
-	}
-	if g.Mode&attrReverse != 0 {
-		parts = append(parts, "7")
-	}
-	if fg := colorCode(g.FG, true); fg != "" {
-		parts = append(parts, fg)
-	}
-	if bg := colorCode(g.BG, false); bg != "" {
-		parts = append(parts, bg)
-	}
-	return "\x1b[" + strings.Join(parts, ";") + "m"
-}
-
-func colorCode(c vt10x.Color, fg bool) string {
-	if fg && c == vt10x.DefaultFG || !fg && c == vt10x.DefaultBG {
-		if fg {
-			return "39"
-		}
-		return "49"
-	}
-	if c < 8 {
-		if fg {
-			return itoa(int(c) + 30)
-		}
-		return itoa(int(c) + 40)
-	}
-	if c < 16 {
-		if fg {
-			return itoa(int(c) + 90 - 8)
-		}
-		return itoa(int(c) + 100 - 8)
-	}
-	if c < 256 {
-		if fg {
-			return "38;5;" + itoa(int(c))
-		}
-		return "48;5;" + itoa(int(c))
-	}
-	r := int(c>>16) & 0xff
-	g := int(c>>8) & 0xff
-	b := int(c) & 0xff
-	if fg {
-		return "38;2;" + itoa(r) + ";" + itoa(g) + ";" + itoa(b)
-	}
-	return "48;2;" + itoa(r) + ";" + itoa(g) + ";" + itoa(b)
+	buf.WriteString(ansiReset)
 }
 
 // sepText renders a block-run separator filling the full width: "────…─── [code] -"
@@ -372,8 +297,29 @@ func sepText(rep, code, cols int) string {
 	return strings.Repeat("─", n) + suffix
 }
 
-func cursorPos(row, col int) string {
-	return "\x1b[" + itoa(row+1) + ";" + itoa(col+1) + "H"
+// blockText renders a block's grid as plain text (no colors or styling):
+// trailing blanks are trimmed from each row and the rows are joined with "\n".
+func blockText(cells [][]vt10x.Glyph) string {
+	if len(cells) == 0 {
+		return ""
+	}
+	lines := make([]string, len(cells))
+	for y, row := range cells {
+		last := -1
+		for x, g := range row {
+			if g.Char != 0 && g.Char != ' ' {
+				last = x
+			}
+		}
+		var b strings.Builder
+		for x := 0; x <= last; x++ {
+			c := row[x].Char
+			if c == 0 {
+				c = ' '
+			}
+			b.WriteRune(c)
+		}
+		lines[y] = b.String()
+	}
+	return strings.Join(lines, "\n")
 }
-
-var _ = sync.Mutex{}

@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"sync"
 	"syscall"
@@ -14,35 +13,6 @@ import (
 	"golang.org/x/term"
 )
 
-// sepPayload is the distinctive body of the zero-width OSC marker embedded in
-// the shell prompt. A user cannot type it, so accidental matches are
-// impossible.
-const sepPayload = "RT;7f3a9b"
-
-// Supported shell modes.
-const (
-	modeSh     = "sh"
-	modeZsh    = "zsh"
-	modeBash   = "bash"
-	modePython = "python"
-)
-
-// sepHead opens the zero-width prompt marker; the shell appends the last
-// command's exit code (digits) then sepEnd (BEL). A user cannot type it, so
-// accidental matches are impossible.
-var (
-	sepHead = []byte("\x1b]" + sepPayload + ";")
-	sepEnd  = byte(0x07)
-)
-
-// DEC 1049 alt-screen toggle, tracked so a ^L at the rt prompt is only
-// intercepted when the shell (not a fullscreen app) is reading.
-const (
-	altPrefixHeader = "\x1b[?1049"
-	enterAlt        = altPrefixHeader + "h"
-	leaveAlt        = altPrefixHeader + "l"
-)
-
 // block is a finished command frozen as a cell grid.
 type block struct {
 	cells [][]vt10x.Glyph
@@ -51,23 +21,23 @@ type block struct {
 	hash  uint64
 }
 
-// rtState owns everything: buffer (stdin reader writes, renderer drains), the
-// vt and history (renderer only), and the log recorder.
-type rtState struct {
-	sync.Mutex
-	buffer      []byte
-	vt          vt10x.Terminal
-	width       int
-	height      int
-	his         []block
-	log         *recorder
-	proc        *exec.Cmd
-	dirty       bool
-	first       bool
-	drain       bool
-	finalCode   int
-	inAltScreen bool
-	clearReq    bool
+// session is the mutable state of a running rt session, kept in one place so
+// the whole of it can be read at a glance. The pty reader and the stdin reader
+// touch fields from other goroutines, so every access to mu, buffer, alt,
+// first, final, finalCode and clearReq is serialized by mu. vt, history and
+// dirty are only ever touched by the main goroutine, but live here too.
+type session struct {
+	mu        sync.Mutex
+	buffer    []byte // pty bytes read but not yet fed to vt
+	alt       bool   // shell is on the DEC 1049 alt screen
+	first     bool   // the bootstrap prompt has not been seen yet
+	final     bool   // pty EOF: flush the unfinished command as the last block
+	finalCode int    // shell exit code, known once final is set
+	clearReq  bool   // a swallowed ^L asked to clear history
+
+	vt      vt10x.Terminal
+	history []block
+	dirty   bool
 }
 
 func main() {
@@ -92,37 +62,47 @@ func main() {
 	}
 }
 
+// run starts the shell in a pty, mirrors its output into a vt emulator, and
+// repaints a frame made of frozen command blocks above the live prompt.
+//
+// Data flow:
+//
+//	pty master --holdIter--> st.buffer --tick/composeChunk--> st.vt
+//	                                                        (frozen at each
+//	                                                         prompt marker into
+//	                                                         st.history)
+//	os.Stdin --swallow--> pty master
+//	st.vt + st.history --renderFrame--> os.Stdout
+//
+// Concurrency: the pty reader and the stdin reader run on their own goroutines;
+// every shared field is serialized by st.mu. The main goroutine owns st.vt,
+// st.history and st.dirty outright, and is the only one that repaints.
 func run(c *cli.Context) error {
 	if os.Getenv("REVERSE_TERMINAL") != "" {
 		return cli.Exit("nested rt unsupported", 1)
 	}
 
-	shell := resolveShell(c.Args().First())
-	mode, err := chooseMode(c.String("mode"), shell)
+	shell := resolveShell(c)
+	mode, err := resolveMode(c)
 	if err != nil {
 		return err
 	}
 
-	interactive := term.IsTerminal(int(os.Stdin.Fd()))
-	restore := func() {}
-	if interactive {
-		f, err := term.MakeRaw(int(os.Stdin.Fd()))
-		if err != nil {
-			return fmt.Errorf("raw: %w", err)
-		}
-		restore = func() {
-			os.Stdout.WriteString("\x1b[?25h\x1b[0m")
-			_ = term.Restore(int(os.Stdin.Fd()), f)
-		}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return fmt.Errorf("stdin is not a terminal")
+	}
+	restore, err := prepareTerm()
+	if err != nil {
+		return err
 	}
 	defer restore()
 
-	w, h := termSize(os.Stdin)
-	if w < 1 || h < 1 {
-		w, h = 80, 24
+	width, height := termSize(os.Stdin)
+	if width < 1 || height < 1 {
+		width, height = 80, 24
 	}
 
-	rec, err := newRecorder()
+	log, err := newRecorder()
 	if err != nil {
 		return fmt.Errorf("recorder: %w", err)
 	}
@@ -133,26 +113,104 @@ func run(c *cli.Context) error {
 	}
 	defer cleanup()
 
-	master, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)})
+	master, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(height), Cols: uint16(width)})
 	if err != nil {
 		return fmt.Errorf("pty: %w", err)
 	}
 
-	rt := &rtState{
-		vt:     vt10x.New(vt10x.WithSize(w, h)),
-		width:  w,
-		height: h,
-		log:    rec,
-		proc:   cmd,
-		dirty:  true,
-		first:  true,
+	st := &session{
+		vt:    vt10x.New(vt10x.WithSize(width, height)),
+		first: true,
+		dirty: true,
 	}
 
-	// held guarantees pty output never splits a prompt-marker head or an
-	// alt-screen toggle across two reads, so per-chunk detection is complete.
-	held := newHoldReader(master, func(b []byte) int {
-		return holdPrefixes(b, [][]byte{sepHead, []byte(enterAlt), []byte(leaveAlt)})
-	})
+	// boundary runs when a prompt marker arrives: the just-finished command's
+	// grid is frozen into history with its exit code (unless this is the first,
+	// bootstrap, prompt), and the emulator is reset for the next command.
+	boundary := func(code int) {
+		log.event("sep")
+		st.dirty = true
+		if !st.first {
+			g, _, _ := snapshotGrid(st.vt)
+			if g != nil {
+				b := newBlock(g, width, code)
+				st.history = append(st.history, b)
+				log.block(len(st.history), blockText(b.cells))
+			}
+		} else {
+			st.first = false
+		}
+		st.vt = vt10x.New(vt10x.WithSize(width, height))
+	}
+
+	// compose feeds a buffer chunk into the emulator, re-buffering any split
+	// marker head.
+	compose := func(data []byte) {
+		if left := composeChunk(&st.vt, data, boundary); len(left) > 0 {
+			st.buffer = append(st.buffer, left...)
+		}
+	}
+
+	// swallow intercepts a pure CTRL-l read at the idle prompt.
+	swallow := func(data []byte) bool {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		if !swallowCtrlL(data, st.buffer, st.first, st.alt) {
+			return false
+		}
+		st.clearReq = true
+		return true
+	}
+
+	// repaint writes the whole frame to the real terminal.
+	repaint := func() {
+		os.Stdout.Write(renderFrame(st.history, st.vt, width, height))
+	}
+
+	// tick drains the buffer into vt at command boundaries, then repaints.
+	tick := func() {
+		st.mu.Lock()
+		if st.clearReq {
+			st.clearReq = false
+			if len(st.history) > 0 {
+				st.history = nil
+				log.event("ctrll clear")
+				st.dirty = true
+			}
+		}
+		if !st.dirty && len(st.buffer) == 0 && !st.final {
+			st.mu.Unlock()
+			return
+		}
+
+		buf := st.buffer
+		st.buffer = nil
+		if len(buf) > 0 {
+			compose(buf)
+			st.dirty = true
+		}
+
+		// EOF: the final unfinished command becomes the last block.
+		if st.final {
+			g, _, _ := snapshotGrid(st.vt)
+			if g != nil {
+				b := newBlock(g, width, st.finalCode)
+				st.history = append(st.history, b)
+				log.event("block " + itoa(len(st.history)) + " (final)")
+				log.block(len(st.history), blockText(b.cells))
+				st.dirty = true
+			}
+			st.vt = vt10x.New(vt10x.WithSize(width, height))
+		}
+
+		if st.dirty {
+			st.dirty = false
+			st.mu.Unlock()
+			repaint()
+			return
+		}
+		st.mu.Unlock()
+	}
 
 	sigwinch := make(chan os.Signal, 1)
 	signal.Notify(sigwinch, syscall.SIGWINCH)
@@ -171,27 +229,30 @@ func run(c *cli.Context) error {
 
 	// Reader: pty -> buffer (never touches vt)
 	go func() {
-		buf := make([]byte, 32768)
-		for {
-			n, rerr := held.Read(buf)
-			if n > 0 {
-				rt.log.rx(buf[:n])
-				rt.Lock()
-				trackAltScreen(buf[:n], &rt.inAltScreen)
-				rt.buffer = append(rt.buffer, buf[:n]...)
-				rt.Unlock()
+		// hold guarantees pty output never splits a prompt-marker head or an
+		// alt-screen toggle across two chunks, so per-chunk detection is complete.
+		hold := func(b []byte) int {
+			return holdPrefixes(b, [][]byte{ansiSepHead, []byte(ansiEnterAltScreen), []byte(ansiLeaveAltScreen)})
+		}
+		for chunk, rerr := range holdIter(master, hold) {
+			if len(chunk) > 0 {
+				log.rx(chunk)
+				st.mu.Lock()
+				trackAltScreen(chunk, &st.alt)
+				st.buffer = append(st.buffer, chunk...)
+				st.mu.Unlock()
 				wake()
 			}
 			if rerr != nil {
 				// EOF from the pty: the shell has exited. Reap it here so the
 				// final unfinished block can carry the shell's own exit code.
 				state, _ := cmd.Process.Wait()
-				rt.Lock()
+				st.mu.Lock()
 				if state != nil {
-					rt.finalCode = state.ExitCode()
+					st.finalCode = state.ExitCode()
 				}
-				rt.drain = true
-				rt.Unlock()
+				st.final = true
+				st.mu.Unlock()
 				wake()
 				return
 			}
@@ -204,12 +265,12 @@ func run(c *cli.Context) error {
 		for {
 			n, rerr := os.Stdin.Read(buf)
 			if n > 0 {
-				if rt.swallowCtrlL(buf[:n]) {
-					rt.log.event("ctrll")
+				if swallow(buf[:n]) {
+					log.event("ctrll")
 					wake()
 					continue
 				}
-				rt.log.tx(buf[:n])
+				log.tx(buf[:n])
 				_, _ = master.Write(buf[:n])
 			}
 			if rerr != nil {
@@ -220,42 +281,59 @@ func run(c *cli.Context) error {
 	}()
 
 	exit := false
-	code := 0
+	onRender := func() {
+		tick()
+	}
+	onWinch := func() {
+		width, height := termSize(os.Stdin)
+		if width < 1 || height < 1 {
+			return
+		}
+		_ = pty.Setsize(master, &pty.Winsize{Rows: uint16(height), Cols: uint16(width)})
+		st.mu.Lock()
+		st.vt.Resize(width, height)
+		st.dirty = true
+		st.mu.Unlock()
+		tick()
+	}
+	onSigint := func() {
+		log.event("SIGINT")
+		_ = syscall.Kill(cmd.Process.Pid, syscall.SIGINT)
+	}
+	onSigterm := func() {
+		log.event("SIGTERM")
+		exit = true
+	}
+	// checkDone reports that the pty hit EOF and the final block has been
+	// flushed into st.history; the select loop then stops.
+	checkDone := func() bool {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		return st.final
+	}
+
 	for !exit {
 		select {
 		case <-renderTick:
-			rt.tick()
+			onRender()
 		case <-sigwinch:
-			w, h = termSize(os.Stdin)
-			if w < 1 || h < 1 {
-				continue
-			}
-			_ = pty.Setsize(master, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)})
-			rt.Lock()
-			rt.width, rt.height = w, h
-			rt.vt.Resize(w, h)
-			rt.dirty = true
-			rt.Unlock()
-			rt.tick()
+			onWinch()
 		case <-sigint:
-			rt.log.event("SIGINT")
-			_ = syscall.Kill(cmd.Process.Pid, syscall.SIGINT)
+			onSigint()
 		case <-sigterm:
-			rt.log.event("SIGTERM")
-			exit = true
+			onSigterm()
 		}
-		rt.Lock()
-		done := rt.drain
-		code = rt.finalCode
-		rt.Unlock()
-		if done {
-			exit = true
+		if checkDone() {
+			break
 		}
 	}
 
-	rt.log.event("exit")
-	rec.Close()
+	log.event("exit")
+	log.Close()
 	_ = master.Close()
+	st.mu.Lock()
+	code := st.finalCode
+	st.mu.Unlock()
 	fmt.Fprintf(os.Stderr, "%s (%s) exited with code %d\n", shell, mode, code)
 	return cli.Exit("", code)
 }
@@ -266,47 +344,4 @@ func termSize(f *os.File) (w, h int) {
 		return 80, 24
 	}
 	return w, h
-}
-
-// tick drains the buffer into vt at command boundaries, then repaints.
-func (rt *rtState) tick() {
-	rt.Lock()
-	if rt.clearReq {
-		rt.clearReq = false
-		if len(rt.his) > 0 {
-			rt.his = nil
-			rt.log.event("ctrll clear")
-			rt.dirty = true
-		}
-	}
-	if !rt.dirty && len(rt.buffer) == 0 && !rt.drain {
-		rt.Unlock()
-		return
-	}
-
-	buf := rt.buffer
-	rt.buffer = nil
-	if len(buf) > 0 {
-		rt.compose(buf)
-		rt.dirty = true
-	}
-
-	// EOF: the final unfinished command becomes the last block.
-	if rt.drain {
-		g, _, _ := rt.snapshot()
-		if g != nil {
-			rt.his = append(rt.his, newBlock(g, rt.width, rt.finalCode))
-			rt.log.event("block " + itoa(len(rt.his)) + " (final)")
-			rt.dirty = true
-		}
-		rt.vt = vt10x.New(vt10x.WithSize(rt.width, rt.height))
-	}
-
-	if rt.dirty {
-		rt.dirty = false
-		rt.Unlock()
-		rt.repaint()
-		return
-	}
-	rt.Unlock()
 }

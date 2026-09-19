@@ -1,11 +1,8 @@
 package main
 
 import (
-	"bufio"
-	"io"
 	"strings"
 	"testing"
-	"time"
 	"unicode/utf8"
 
 	"github.com/hinshun/vt10x"
@@ -107,7 +104,12 @@ func TestBlocksEqual(t *testing.T) {
 		{"char", func(b block) block { n := clone(b); set(n.cells, 0, 0, 'z', 1, 2); return n }, false},
 		{"fg", func(b block) block { n := clone(b); set(n.cells, 0, 0, 'a', 9, 2); return n }, false},
 		{"bg", func(b block) block { n := clone(b); set(n.cells, 0, 0, 'a', 1, 9); return n }, false},
-		{"mode", func(b block) block { n := clone(b); gg := n.cells[0][0]; n.cells[0][0] = vt10x.Glyph{Char: gg.Char, Mode: gg.Mode + 1, FG: gg.FG, BG: gg.BG}; return n }, false},
+		{"mode", func(b block) block {
+			n := clone(b)
+			gg := n.cells[0][0]
+			n.cells[0][0] = vt10x.Glyph{Char: gg.Char, Mode: gg.Mode + 1, FG: gg.FG, BG: gg.BG}
+			return n
+		}, false},
 		{"rowcount", func(b block) block { n := clone(b); n.cells = n.cells[:1]; return n }, false},
 		{"rowwidth", func(b block) block { n := clone(b); n.cells[0] = n.cells[0][:2]; return n }, false},
 		{"code", func(b block) block { n := clone(b); n.code = 7; return n }, true},
@@ -147,6 +149,66 @@ func displayWidth(s string) int {
 	return utf8.RuneCountInString(s)
 }
 
+func TestBlockText(t *testing.T) {
+	cases := []struct {
+		name string
+		grid [][]vt10x.Glyph
+		want string
+	}{
+		{
+			"trailing blanks trimmed",
+			func() [][]vt10x.Glyph {
+				g := mkGrid(1, 5)
+				set(g, 0, 0, 'a', 1, 2)
+				set(g, 1, 0, 'b', 1, 2)
+				return g
+			}(),
+			"ab",
+		},
+		{
+			"all empty",
+			func() [][]vt10x.Glyph {
+				g := mkGrid(1, 4)
+				set(g, 1, 0, ' ', 1, 2)
+				return g
+			}(),
+			"",
+		},
+		{
+			"nil grid",
+			nil,
+			"",
+		},
+		{
+			"interior spaces preserved",
+			func() [][]vt10x.Glyph {
+				g := mkGrid(1, 4)
+				set(g, 0, 0, 'a', 1, 2)
+				set(g, 2, 0, 'c', 1, 2)
+				return g
+			}(),
+			"a c",
+		},
+		{
+			"multi row join",
+			func() [][]vt10x.Glyph {
+				g := mkGrid(2, 3)
+				set(g, 0, 0, 'x', 1, 2)
+				set(g, 0, 1, 'y', 1, 2)
+				return g
+			}(),
+			"x\ny",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := blockText(c.grid); got != c.want {
+				t.Fatalf("blockText = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 func TestHoldPrefixes(t *testing.T) {
 	cases := []struct {
 		name string
@@ -182,12 +244,12 @@ func TestTrackAltScreen(t *testing.T) {
 		data string
 		want bool
 	}{
-		{"enter only", "\x1b[?1049h", true},
-		{"leave only", "\x1b[?1049l", false},
-		{"enter then leave", "\x1b[?1049h\x1b[?1049l", false},
-		{"double enter then leave", "\x1b[?1049h\x1b[?1049h\x1b[?1049l", false},
-		{"header then x unchanged", "\x1b[?1049x", false},
-		{"trailing prefix guarded", "\x1b[?1049", false},
+		{"enter only", ansiEnterAltScreen, true},
+		{"leave only", ansiLeaveAltScreen, false},
+		{"enter then leave", ansiEnterAltScreen + ansiLeaveAltScreen, false},
+		{"double enter then leave", ansiEnterAltScreen + ansiEnterAltScreen + ansiLeaveAltScreen, false},
+		{"header then x unchanged", ansiAltPrefix + "x", false},
+		{"trailing prefix guarded", ansiAltPrefix, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -201,70 +263,66 @@ func TestTrackAltScreen(t *testing.T) {
 }
 
 func TestSwallowCtrlL(t *testing.T) {
-	idle := func() *rtState {
-		return &rtState{}
-	}
 	cases := []struct {
-		name   string
-		rt     *rtState
-		data   string
+		name    string
+		data    string
+		buffer  []byte
+		first   bool
+		inAlt   bool
 		swallow bool
 	}{
-		{"idle pure ctrl-l", idle(), "\x0c", true},
-		{"double ctrl-l", idle(), "\x0c\x0c", true},
-		{"bootstrap prompt", &rtState{first: true}, "\x0c", false},
-		{"buffer non-empty", &rtState{buffer: []byte("x")}, "\x0c", false},
-		{"in alt-screen", &rtState{inAltScreen: true}, "\x0c", false},
-		{"pasted mixed", idle(), "\x0cA", false},
-		{"empty read", idle(), "", false},
+		{"idle pure ctrl-l", "\x0c", nil, false, false, true},
+		{"double ctrl-l", "\x0c\x0c", nil, false, false, true},
+		{"bootstrap prompt", "\x0c", nil, true, false, false},
+		{"buffer non-empty", "\x0c", []byte("x"), false, false, false},
+		{"in alt-screen", "\x0c", nil, false, true, false},
+		{"pasted mixed", "\x0cA", nil, false, false, false},
+		{"empty read", "", nil, false, false, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := c.rt.swallowCtrlL([]byte(c.data))
-			if got != c.swallow {
+			if got := swallowCtrlL([]byte(c.data), c.buffer, c.first, c.inAlt); got != c.swallow {
 				t.Fatalf("swallowCtrlL = %v, want %v", got, c.swallow)
-			}
-			if c.swallow != (c.rt.clearReq) {
-				t.Fatalf("clearReq = %v, want %v", c.rt.clearReq, c.swallow)
 			}
 		})
 	}
 }
 
 func TestComposeMarkerSplit(t *testing.T) {
-	rt := &rtState{
-		vt:     vt10x.New(vt10x.WithSize(80, 24)),
-		width:  80,
-		height: 24,
-		first:  false,
-		log:    &recorder{init: time.Now(), w: bufio.NewWriter(io.Discard)},
+	vt := vt10x.New(vt10x.WithSize(80, 24))
+	var his []block
+	boundary := func(code int) {
+		g, _, _ := snapshotGrid(vt)
+		if g != nil {
+			his = append(his, newBlock(g, 80, code))
+		}
+		vt = vt10x.New(vt10x.WithSize(80, 24))
 	}
-	watched := [][]byte{sepHead, []byte(enterAlt), []byte(leaveAlt)}
-	held := newHoldReader(&chunkReader{chunks: [][]byte{
-		[]byte("..cmd\n" + string(sepHead) + "0"),
+	watched := [][]byte{ansiSepHead, []byte(ansiEnterAltScreen), []byte(ansiLeaveAltScreen)}
+	var buffer []byte
+	for chunk, err := range holdIter(&chunkReader{chunks: [][]byte{
+		[]byte("..cmd\n" + string(ansiSepHead) + "0"),
 		[]byte("\x07> "),
 	}}, func(b []byte) int {
 		return holdPrefixes(b, watched)
-	})
-
-	p := make([]byte, 4096)
-	for {
-		n, err := held.Read(p)
-		if n > 0 {
-			rt.buffer = append(rt.buffer, p[:n]...)
-			buf := rt.buffer
-			rt.buffer = nil
-			rt.compose(buf)
+	}) {
+		if len(chunk) > 0 {
+			buffer = append(buffer, chunk...)
+			buf := buffer
+			buffer = nil
+			if left := composeChunk(&vt, buf, boundary); len(left) > 0 {
+				buffer = append(buffer, left...)
+			}
 		}
 		if err != nil {
 			break
 		}
 	}
-	if len(rt.his) != 1 {
-		t.Fatalf("his has %d blocks, want 1", len(rt.his))
+	if len(his) != 1 {
+		t.Fatalf("his has %d blocks, want 1", len(his))
 	}
 	found := false
-	for _, row := range rt.his[0].cells {
+	for _, row := range his[0].cells {
 		for _, g := range row {
 			if g.Char == 'm' {
 				found = true
@@ -273,5 +331,26 @@ func TestComposeMarkerSplit(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("block grid missing command text")
+	}
+	// trailing prompt text after the marker must land in the fresh emulator,
+	// not the frozen block (regression: stale vt passed by value)
+	for _, row := range his[0].cells {
+		for _, g := range row {
+			if g.Char == '>' {
+				t.Fatal("trailing prompt text leaked into the frozen block")
+			}
+		}
+	}
+	foundPrompt := false
+	cols, rows := vt.Size()
+	for y := 0; y < rows; y++ {
+		for x := 0; x < cols; x++ {
+			if vt.Cell(x, y).Char == '>' {
+				foundPrompt = true
+			}
+		}
+	}
+	if !foundPrompt {
+		t.Fatal("trailing prompt text missing from live emulator")
 	}
 }

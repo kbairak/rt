@@ -3,7 +3,62 @@ package main
 import (
 	"fmt"
 	"strings"
+
+	"github.com/hinshun/vt10x"
 )
+
+// ANSI escape building blocks. Every Go-side ANSI sequence lives here.
+const (
+	ansiEsc = byte(0x1b)
+	ansiBel = byte(0x07)
+)
+
+// ansiRtPayload is the distinctive body of the zero-width OSC marker embedded
+// in the shell prompt. A user cannot type it, so accidental matches are
+// impossible.
+const ansiRtPayload = "RT;7f3a9b"
+
+// ansiSepHead opens the zero-width prompt marker; the shell appends the last
+// command's exit code (digits) then ansiSepEnd (BEL).
+var ansiSepHead = []byte(ansiOscOpen(ansiRtPayload + ";"))
+
+const ansiSepEnd = ansiBel
+
+// DEC 1049 alt-screen toggle, tracked so a ^L at the rt prompt is only
+// intercepted when the shell (not a fullscreen app) is reading.
+const (
+	ansiAltPrefix      = "\x1b[?1049"
+	ansiEnterAltScreen = ansiAltPrefix + "h"
+	ansiLeaveAltScreen = ansiAltPrefix + "l"
+)
+
+// Screen control sequences.
+const (
+	ansiHideCursor  = "\x1b[?25l"
+	ansiShowCursor  = "\x1b[?25h"
+	ansiReset       = "\x1b[0m"
+	ansiClearScreen = "\x1b[H\x1b[2J"
+)
+
+// ansiOsc wraps a payload in an OSC sequence (ESC ] payload BEL).
+func ansiOsc(payload string) string {
+	return "\x1b]" + payload + "\x07"
+}
+
+// ansiOscOpen starts an OSC sequence without its terminator.
+func ansiOscOpen(payload string) string {
+	return "\x1b]" + payload
+}
+
+// ansiCsiSeq builds a CSI sequence (ESC [ params final).
+func ansiCsiSeq(params string, final byte) string {
+	return "\x1b[" + params + string(final)
+}
+
+// ansiCursorPos moves the cursor to a 0-based row/col (1-based ANSI).
+func ansiCursorPos(row, col int) string {
+	return ansiCsiSeq(itoa(row+1)+";"+itoa(col+1), 'H')
+}
 
 // ansiSeqLen returns the length of the escape sequence starting at data[0].
 func ansiSeqLen(data []byte) int {
@@ -20,7 +75,7 @@ func ansiSeqLen(data []byte) int {
 	}
 	if data[1] == ']' {
 		for i := 2; i < len(data); i++ {
-			if data[i] == 0x07 {
+			if data[i] == ansiBel {
 				return i + 1
 			}
 		}
@@ -32,7 +87,7 @@ func ansiSeqLen(data []byte) int {
 func ansiRepr(seq []byte) string {
 	var b strings.Builder
 	for _, c := range seq {
-		if c == 0x1b {
+		if c == ansiEsc {
 			b.WriteString("ESC")
 		} else if c >= 0x20 && c < 0x7f {
 			b.WriteRune(rune(c))
@@ -44,11 +99,11 @@ func ansiRepr(seq []byte) string {
 }
 
 func ansiMeaning(seq []byte) string {
-	if len(seq) < 2 || seq[0] != 0x1b {
+	if len(seq) < 2 || seq[0] != ansiEsc {
 		return ""
 	}
 	if seq[1] == ']' {
-		if seq[len(seq)-1] != 0x07 {
+		if seq[len(seq)-1] != ansiBel {
 			return " (OSC partial)"
 		}
 		return " (OSC)"
@@ -59,22 +114,22 @@ func ansiMeaning(seq []byte) string {
 	if len(seq) < 3 || seq[len(seq)-1] >= 0x20 && seq[len(seq)-1] <= 0x3f {
 		return " (CSI partial)"
 	}
-	params, final := csiParams(seq)
+	params, final := ansiCsiParams(seq)
 	if len(params) > 0 && strings.HasPrefix(params[0], "?") {
 		params[0] = params[0][1:]
-		return privateMode(params, final)
+		return ansiPrivateMode(params, final)
 	}
 	switch final {
 	case 'm':
-		return sgrName(params)
+		return ansiSgrName(params)
 	case 'A':
-		return " (cursor up " + itoa(firstParam(params, 1)) + ")"
+		return " (cursor up " + itoa(ansiFirstParam(params, 1)) + ")"
 	case 'B':
-		return " (cursor down " + itoa(firstParam(params, 1)) + ")"
+		return " (cursor down " + itoa(ansiFirstParam(params, 1)) + ")"
 	case 'C':
-		return " (cursor right " + itoa(firstParam(params, 1)) + ")"
+		return " (cursor right " + itoa(ansiFirstParam(params, 1)) + ")"
 	case 'D':
-		return " (cursor left " + itoa(firstParam(params, 1)) + ")"
+		return " (cursor left " + itoa(ansiFirstParam(params, 1)) + ")"
 	case 'H':
 		return " (cursor home)"
 	case 'J':
@@ -88,7 +143,7 @@ func ansiMeaning(seq []byte) string {
 	}
 }
 
-func firstParam(params []string, def int) int {
+func ansiFirstParam(params []string, def int) int {
 	if len(params) < 1 || params[0] == "" {
 		return def
 	}
@@ -99,7 +154,7 @@ func firstParam(params []string, def int) int {
 	return n
 }
 
-func csiParams(seq []byte) ([]string, byte) {
+func ansiCsiParams(seq []byte) ([]string, byte) {
 	final := seq[len(seq)-1]
 	body := seq[2 : len(seq)-1]
 	var out []string
@@ -116,33 +171,7 @@ func csiParams(seq []byte) ([]string, byte) {
 	return out, final
 }
 
-func parseInt(s string) (int, bool) {
-	if s == "" {
-		return 0, false
-	}
-	n := 0
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return 0, false
-		}
-		n = n*10 + int(c-'0')
-	}
-	return n, true
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
-}
-
-func sgrName(params []string) string {
+func ansiSgrName(params []string) string {
 	var parts []string
 	for i := 0; i < len(params); i++ {
 		n, ok := parseInt(params[i])
@@ -235,7 +264,7 @@ func ansiColor(i int) string {
 	}
 }
 
-func privateMode(params []string, final byte) string {
+func ansiPrivateMode(params []string, final byte) string {
 	n, ok := parseInt(params[0])
 	if !ok {
 		return ""
@@ -258,4 +287,61 @@ func privateMode(params []string, final byte) string {
 	default:
 		return " (DEC " + itoa(n) + " " + val + ")"
 	}
+}
+
+// ansiSgr renders a glyph's attributes and colors as one SGR sequence.
+func ansiSgr(g vt10x.Glyph) string {
+	var parts []string
+	parts = append(parts, "0")
+	if g.Mode&attrBold != 0 {
+		parts = append(parts, "1")
+	}
+	if g.Mode&attrUnderline != 0 {
+		parts = append(parts, "4")
+	}
+	if g.Mode&attrReverse != 0 {
+		parts = append(parts, "7")
+	}
+	if fg := ansiColorCode(g.FG, true); fg != "" {
+		parts = append(parts, fg)
+	}
+	if bg := ansiColorCode(g.BG, false); bg != "" {
+		parts = append(parts, bg)
+	}
+	return ansiCsiSeq(strings.Join(parts, ";"), 'm')
+}
+
+// ansiColorCode maps a vt color to its SGR parameter list for fg or bg.
+func ansiColorCode(c vt10x.Color, fg bool) string {
+	if fg && c == vt10x.DefaultFG || !fg && c == vt10x.DefaultBG {
+		if fg {
+			return "39"
+		}
+		return "49"
+	}
+	if c < 8 {
+		if fg {
+			return itoa(int(c) + 30)
+		}
+		return itoa(int(c) + 40)
+	}
+	if c < 16 {
+		if fg {
+			return itoa(int(c) + 90 - 8)
+		}
+		return itoa(int(c) + 100 - 8)
+	}
+	if c < 256 {
+		if fg {
+			return "38;5;" + itoa(int(c))
+		}
+		return "48;5;" + itoa(int(c))
+	}
+	r := int(c>>16) & 0xff
+	g := int(c>>8) & 0xff
+	b := int(c) & 0xff
+	if fg {
+		return "38;2;" + itoa(r) + ";" + itoa(g) + ";" + itoa(b)
+	}
+	return "48;2;" + itoa(r) + ";" + itoa(g) + ";" + itoa(b)
 }
