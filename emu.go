@@ -182,21 +182,24 @@ func snapshotGrid(vt vt10x.Terminal) ([][]vt10x.Glyph, int, int) {
 // cropped to height. With ov != nil (copy mode) the live grid is hidden, every
 // history block is shifted one column right into a gutter, the selected block
 // gets a green vertical line in that gutter, and the bottom row is the status
-// line. Rows past the content are nil. It also returns the live emulator cursor
-// position.
+// line. ov.scroll is the first history line shown (0 = newest entry's
+// separator). Rows past the content are nil. It also returns the live emulator
+// cursor position.
 func compose(his []block, vt vt10x.Terminal, width, height int, ov *overlay) ([][]byte, int, int) {
 	rows := make([][]byte, height)
 	grid, cx, cy := snapshotGrid(vt)
 
-	// In copy mode the leftmost column is a gutter and the bottom row is the
-	// status line.
+	// In copy mode the leftmost column is a gutter, the bottom row is the
+	// status line, and history is scrolled by ov.scroll.
 	contentW := width
 	limit := height
+	skip := 0
 	if ov != nil {
 		if contentW = width - 1; contentW < 0 {
 			contentW = 0
 		}
 		limit--
+		skip = ov.scroll
 	}
 
 	var line bytes.Buffer
@@ -215,8 +218,19 @@ func compose(his []block, vt vt10x.Terminal, width, height int, ov *overlay) ([]
 		}
 	}
 
+	pos := 0 // running line index of the current entry's separator
 	for k := len(his) - 1; k >= 0 && y < limit; k-- {
 		b := his[k]
+		span := entryHeight(b)
+		start := pos
+		pos += span
+		if start+span-1 < skip {
+			continue // entirely above the viewport
+		}
+		skipEntry := 0
+		if skip > start {
+			skipEntry = skip - start
+		}
 		rep := b.count
 		if rep < 1 {
 			rep = 1
@@ -228,9 +242,15 @@ func compose(his []block, vt vt10x.Terminal, width, height int, ov *overlay) ([]
 				gutter = ansiGreen + gutterLine + ansiReset
 			}
 		}
-		rows[y] = append([]byte(gutter), sepText(rep, b.code, contentW)...)
-		y++
-		for r := 0; r < len(b.cells) && y < limit; r++ {
+		if skipEntry == 0 {
+			rows[y] = append([]byte(gutter), sepText(rep, b.code, contentW)...)
+			y++
+		}
+		r0 := 0
+		if skipEntry >= 1 {
+			r0 = skipEntry - 1
+		}
+		for r := r0; r < len(b.cells) && y < limit; r++ {
 			w := b.width
 			if w > contentW {
 				w = contentW

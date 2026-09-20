@@ -60,6 +60,7 @@ type session struct {
 	// (representative block of a collapsed run).
 	copyActive  bool
 	sel         int
+	scroll      int
 	copyPend    []byte
 	copyPending bool
 	copySel     int
@@ -203,6 +204,7 @@ func (s *session) routeStdin(data []byte) {
 		len(s.buffer) == 0 && !s.first && !s.alt && len(s.history) > 0 {
 		s.copyActive = true
 		s.sel = len(s.history) - 1
+		s.scroll = 0
 		s.copyPend = nil
 		s.dirty = true
 		s.mu.Unlock()
@@ -409,7 +411,7 @@ func (s *session) paint() {
 	w, h := s.width, s.height
 	var ov *overlay
 	if s.copyActive {
-		ov = &overlay{sel: s.sel}
+		ov = &overlay{sel: s.sel, scroll: s.scroll}
 	}
 	s.mu.Unlock()
 

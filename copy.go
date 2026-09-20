@@ -12,10 +12,11 @@ const copyKey = 0x1e
 const gutterLine = "│"
 
 // overlay is the copy-mode view state handed to the renderer while active. sel
-// is an index into history (0 = oldest), always the representative block of a
-// collapsed duplicate run.
+// is an index into history (0 = oldest); scroll is the first history line shown
+// (0 = the newest entry's separator).
 type overlay struct {
-	sel int
+	sel    int
+	scroll int
 }
 
 // overlayAction is a decoded keystroke in copy mode.
@@ -155,6 +156,7 @@ func (s *session) handleCopyInput(data []byte) {
 			return
 		}
 	}
+	s.scroll = adjustScroll(s.history, s.sel, s.scroll, viewHeight(s.height))
 	s.dirty = true
 	s.wake()
 }
@@ -165,6 +167,80 @@ func (s *session) closeOverlay() {
 	s.copyPend = nil
 	s.dirty = true
 	s.wake()
+}
+
+// entryHeight is the number of screen lines a history entry occupies: its
+// separator plus one line per grid row.
+func entryHeight(b block) int {
+	return 1 + len(b.cells)
+}
+
+// totalLines is the total number of history lines in newest-first order.
+func totalLines(his []block) int {
+	n := 0
+	for _, b := range his {
+		n += entryHeight(b)
+	}
+	return n
+}
+
+// topLine returns the line index of entry i's separator. Line 0 is the newest
+// entry's separator; older entries follow downward.
+func topLine(his []block, i int) int {
+	t := 0
+	for j := len(his) - 1; j > i; j-- {
+		t += entryHeight(his[j])
+	}
+	return t
+}
+
+// viewHeight is the number of history rows visible in copy mode: the terminal
+// height minus the status row.
+func viewHeight(height int) int {
+	if v := height - 1; v > 0 {
+		return v
+	}
+	return 1
+}
+
+// adjustScroll moves scroll as little as possible so entry sel is fully
+// visible. A block taller than the viewport is aligned to the top instead.
+func adjustScroll(his []block, sel, scroll, v int) int {
+	if len(his) == 0 {
+		return 0
+	}
+	if sel < 0 {
+		sel = 0
+	}
+	if sel >= len(his) {
+		sel = len(his) - 1
+	}
+	t := topLine(his, sel)
+	h := entryHeight(his[sel])
+	if h > v {
+		scroll = t
+	} else {
+		lo := t + h - v // bottom aligned: reveal the last line
+		if lo < 0 {
+			lo = 0
+		}
+		switch {
+		case scroll < lo:
+			scroll = lo
+		case scroll > t:
+			scroll = t
+		}
+	}
+	max := totalLines(his) - v
+	if max < 0 {
+		max = 0
+	}
+	if scroll < 0 {
+		scroll = 0
+	} else if scroll > max {
+		scroll = max
+	}
+	return scroll
 }
 
 // overlayStatus renders the bottom status row for copy mode: the selected block

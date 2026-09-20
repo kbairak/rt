@@ -98,7 +98,7 @@ func TestDecodeOverlaySplitSequence(t *testing.T) {
 func TestCopyNavigation(t *testing.T) {
 	// history is already collapsed at append time: A B C (oldest -> newest).
 	h := []block{mkBlock('A', 4), mkBlock('B', 4), mkBlock('C', 4)}
-	s := &session{history: h, copyActive: true, sel: len(h) - 1}
+	s := &session{history: h, copyActive: true, sel: len(h) - 1, height: 10}
 
 	s.handleCopyInput([]byte("j")) // C -> B
 	if s.sel != 1 {
@@ -229,5 +229,68 @@ func TestOnlyHasCopyKeys(t *testing.T) {
 	}
 	if onlyHasCopyKeys(nil) || onlyHasCopyKeys([]byte{copyKey, 'a'}) {
 		t.Fatal("empty or mixed reads must not match")
+	}
+}
+
+// mkRows builds a block of one-column rows, one glyph per row.
+func mkRows(chars string, width int) block {
+	g := mkGrid(len(chars), width)
+	for y, c := range chars {
+		set(g, 0, y, c, vt10x.DefaultFG, vt10x.DefaultBG)
+	}
+	return newBlock(g, width, 0)
+}
+
+func TestAdjustScrollRevealsMinimally(t *testing.T) {
+	// Three 2-line entries (separator + 1 row), viewport 3 lines.
+	his := []block{mkBlock('A', 4), mkBlock('B', 4), mkBlock('C', 4)}
+	// top lines: C=0, B=2, A=4; total=6.
+	const v = 3
+
+	// Newest fully visible from scroll 2? It occupies lines 0..1, so scroll=2
+	// hides it; reveal minimally -> 0.
+	if got := adjustScroll(his, 2, 2, v); got != 0 {
+		t.Fatalf("select newest: scroll=%d want 0", got)
+	}
+	// Middle occupies 2..3; from scroll 0 reveal bottom -> 1.
+	if got := adjustScroll(his, 1, 0, v); got != 1 {
+		t.Fatalf("select middle: scroll=%d want 1", got)
+	}
+	// Middle already fully visible at scroll 1 -> unchanged.
+	if got := adjustScroll(his, 1, 1, v); got != 1 {
+		t.Fatalf("middle visible: scroll=%d want 1", got)
+	}
+	// Oldest occupies 4..5; clamp at max=total-v=3.
+	if got := adjustScroll(his, 0, 0, v); got != 3 {
+		t.Fatalf("select oldest: scroll=%d want 3", got)
+	}
+}
+
+func TestAdjustScrollAlignsTallBlockToTop(t *testing.T) {
+	tall := mkRows("abcde", 4)            // 5 rows + separator = 6 lines, viewport 3
+	his := []block{tall, mkBlock('Z', 4)} // Z newest (2 lines), tall oldest
+	// tall top line = 2. h=6 > v=3 -> align top.
+	if got := adjustScroll(his, 0, 0, 3); got != 2 {
+		t.Fatalf("tall block: scroll=%d want 2", got)
+	}
+}
+
+func TestComposeScrollCropsTop(t *testing.T) {
+	// A older, B newer; each has 2 rows (separator + 2 = 3 lines).
+	a := mkRows("pq", 4)
+	b := mkRows("xy", 4)
+	his := []block{a, b} // B lines 0..2, A lines 3..5
+
+	// scroll=2 lands inside B: skip separator and row "x", start at "y".
+	rows, _, _ := compose(his, vtWith(t, 10, 4, ""), 10, 4, &overlay{sel: 0, scroll: 2})
+	if !strings.Contains(string(rows[0]), "y") || strings.Contains(string(rows[0]), "x") {
+		t.Fatalf("row 0 must start mid-block at 'y': %q", rows[0])
+	}
+	// Next row is A's separator, then A's first row.
+	if !strings.Contains(string(rows[1]), "─") {
+		t.Fatalf("row 1 must be A's separator: %q", rows[1])
+	}
+	if !strings.Contains(string(rows[2]), "p") {
+		t.Fatalf("row 2 must be A's first row: %q", rows[2])
 	}
 }
