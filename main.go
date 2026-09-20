@@ -159,7 +159,6 @@ func run(c *cli.Context) error {
 	}
 
 	s := &session{
-		vt:      vt10x.New(vt10x.WithSize(width, height)),
 		first:   true,
 		dirty:   true,
 		width:   width,
@@ -170,6 +169,7 @@ func run(c *cli.Context) error {
 		master:  master,
 		cmd:     cmd,
 	}
+	s.vt = s.newVT()
 
 	go s.forwardStdin() // stdin -> pty
 	go s.readPty()      // pty   -> buffer
@@ -419,7 +419,7 @@ func (s *session) freezeCommand(code int) {
 	} else {
 		s.first = false
 	}
-	s.vt = vt10x.New(vt10x.WithSize(s.width, s.height))
+	s.vt = s.newVT()
 }
 
 // freezeFinal freezes the still-unfinished command as the last block when the
@@ -436,7 +436,7 @@ func (s *session) freezeFinal() {
 		}
 		s.dirty = true
 	}
-	s.vt = vt10x.New(vt10x.WithSize(s.width, s.height))
+	s.vt = s.newVT()
 }
 
 // appendBlock adds b to history, collapsing it into the newest entry when the
