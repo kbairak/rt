@@ -177,45 +177,72 @@ func snapshotGrid(vt vt10x.Terminal) ([][]vt10x.Glyph, int, int) {
 	return grid[:last+1], cx, cy
 }
 
-// compose builds every screen row as ANSI bytes: the live emulator grid first,
-// then history blocks newest-first with a header row, cropped to height. Rows
-// past the content are nil. It also returns the live emulator cursor position.
-func compose(his []block, vt vt10x.Terminal, width, height int) ([][]byte, int, int) {
+// compose builds every screen row as ANSI bytes. With ov == nil it renders the
+// live emulator grid first, then history blocks newest-first with a header row,
+// cropped to height. With ov != nil (copy mode) the live grid is hidden, every
+// history block is shifted one column right into a gutter, the selected block
+// gets a green vertical line in that gutter, and the bottom row is the status
+// line. Rows past the content are nil. It also returns the live emulator cursor
+// position.
+func compose(his []block, vt vt10x.Terminal, width, height int, ov *overlay) ([][]byte, int, int) {
 	rows := make([][]byte, height)
 	grid, cx, cy := snapshotGrid(vt)
 
+	// In copy mode the leftmost column is a gutter and the bottom row is the
+	// status line.
+	contentW := width
+	limit := height
+	if ov != nil {
+		if contentW = width - 1; contentW < 0 {
+			contentW = 0
+		}
+		limit--
+	}
+
 	var line bytes.Buffer
-	put := func(y int, row []vt10x.Glyph, width int) {
+	put := func(y int, row []vt10x.Glyph, w int, gutter string) {
 		line.Reset()
-		cellRow(&line, row, width)
+		line.WriteString(gutter)
+		cellRow(&line, row, w)
 		rows[y] = append([]byte(nil), line.Bytes()...)
 	}
 
 	y := 0
-	if grid != nil {
+	if ov == nil && grid != nil {
 		for r := 0; r < len(grid) && y < height; r++ {
-			put(y, grid[r], width)
+			put(y, grid[r], width, "")
 			y++
 		}
 	}
 
-	for k := len(his) - 1; k >= 0 && y < height; k-- {
+	for k := len(his) - 1; k >= 0 && y < limit; k-- {
 		b := his[k]
 		rep := 1
 		for j := k - 1; j >= 0 && blocksEqual(b, his[j]); j-- {
 			rep++
 		}
 		k -= rep - 1 // skip the older, now-collapsed duplicates
-		rows[y] = []byte(sepText(rep, b.code, width))
-		y++
-		for r := 0; r < len(b.cells) && y < height; r++ {
-			w := b.width
-			if w > width {
-				w = width
+		gutter := ""
+		if ov != nil {
+			gutter = " "
+			if k == ov.sel {
+				gutter = ansiGreen + gutterLine + ansiReset
 			}
-			put(y, b.cells[r], w)
+		}
+		rows[y] = append([]byte(gutter), sepText(rep, b.code, contentW)...)
+		y++
+		for r := 0; r < len(b.cells) && y < limit; r++ {
+			w := b.width
+			if w > contentW {
+				w = contentW
+			}
+			put(y, b.cells[r], w, gutter)
 			y++
 		}
+	}
+
+	if ov != nil && height > 0 {
+		rows[height-1] = []byte(overlayStatus(ov, len(his), width))
 	}
 	return rows, cx, cy
 }
@@ -235,8 +262,8 @@ type renderer struct {
 // size change, otherwise only the changed rows. The cursor position is always
 // emitted. The whole update is wrapped in DEC 2026 so capable terminals render
 // it atomically; others ignore the wrapper.
-func (r *renderer) frame(his []block, vt vt10x.Terminal, width, height int) []byte {
-	rows, cx, cy := compose(his, vt, width, height)
+func (r *renderer) frame(his []block, vt vt10x.Terminal, width, height int, ov *overlay) []byte {
+	rows, cx, cy := compose(his, vt, width, height, ov)
 
 	var body bytes.Buffer
 	if !r.init || width != r.width || height != r.height || len(r.prev) != height {

@@ -23,7 +23,7 @@ func count(s, sub string) int {
 
 func TestFrameInitialFullClear(t *testing.T) {
 	r := &renderer{}
-	out := string(r.frame(nil, vtWith(t, 80, 24, "hello"), 80, 24))
+	out := string(r.frame(nil, vtWith(t, 80, 24, "hello"), 80, 24, nil))
 
 	if !strings.Contains(out, ansiClearScreen) {
 		t.Fatal("first frame must clear the screen")
@@ -39,9 +39,9 @@ func TestFrameInitialFullClear(t *testing.T) {
 func TestFrameUnchangedEmitsNoRows(t *testing.T) {
 	vt := vtWith(t, 80, 24, "hello")
 	r := &renderer{}
-	r.frame(nil, vt, 80, 24)
+	r.frame(nil, vt, 80, 24, nil)
 
-	out := string(r.frame(nil, vt, 80, 24))
+	out := string(r.frame(nil, vt, 80, 24, nil))
 	if strings.Contains(out, ansiClearScreen) {
 		t.Fatal("unchanged frame must not clear")
 	}
@@ -53,12 +53,12 @@ func TestFrameUnchangedEmitsNoRows(t *testing.T) {
 func TestFrameEmitsOnlyChangedRow(t *testing.T) {
 	vt := vtWith(t, 80, 24, "hello")
 	r := &renderer{}
-	r.frame(nil, vt, 80, 24)
+	r.frame(nil, vt, 80, 24, nil)
 
 	if _, err := vt.Write([]byte("\r\nworld")); err != nil {
 		t.Fatalf("vt.Write: %v", err)
 	}
-	out := string(r.frame(nil, vt, 80, 24))
+	out := string(r.frame(nil, vt, 80, 24, nil))
 
 	if strings.Contains(out, ansiCursorPos(0, 0)) {
 		t.Fatal("unchanged row 0 must not be re-emitted")
@@ -80,9 +80,9 @@ func TestFrameClearsStaleRows(t *testing.T) {
 
 	vt := vtWith(t, 80, 24, "")
 	r := &renderer{}
-	r.frame(his, vt, 80, 24)
+	r.frame(his, vt, 80, 24, nil)
 
-	out := string(r.frame(nil, vt, 80, 24))
+	out := string(r.frame(nil, vt, 80, 24, nil))
 	if strings.Contains(out, ansiClearScreen) {
 		t.Fatal("shrink must not full-clear")
 	}
@@ -99,9 +99,9 @@ func TestFrameClearsStaleRows(t *testing.T) {
 func TestFrameResizeForcesFullClear(t *testing.T) {
 	vt := vtWith(t, 80, 24, "hello")
 	r := &renderer{}
-	r.frame(nil, vt, 80, 24)
+	r.frame(nil, vt, 80, 24, nil)
 
-	out := string(r.frame(nil, vt, 40, 24))
+	out := string(r.frame(nil, vt, 40, 24, nil))
 	if !strings.Contains(out, ansiClearScreen) {
 		t.Fatal("size change must force a full clear")
 	}

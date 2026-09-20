@@ -18,6 +18,10 @@ import (
 // frameInterval caps how often the view repaints.
 const frameInterval = time.Second / 30
 
+// outMu serializes writes to the real terminal: the loop paints frames while
+// the copy path may emit an OSC 52 clipboard sequence.
+var outMu sync.Mutex
+
 // block is a finished command frozen as a cell grid.
 type block struct {
 	cells [][]vt10x.Glyph
@@ -33,9 +37,10 @@ type block struct {
 //   - readPty:      pty   -> buffer
 //   - loop:         wakes on events, composes the buffer into vt, repaints
 //
-// buffer, alt, first, final, finalCode, clearReq and the current width/height
-// are shared, so access to them is serialized by mu. vt, history and dirty are
-// only ever touched by the loop goroutine, but live here too.
+// buffer, alt, first, final, finalCode, clearReq, the copy-overlay fields and
+// the current width/height are shared, so access to them is serialized by mu.
+// vt, history and dirty are only ever touched by the loop goroutine, but live
+// here too.
 type session struct {
 	mu        sync.Mutex
 	buffer    []byte // pty bytes read but not yet fed to vt
@@ -46,6 +51,15 @@ type session struct {
 	clearReq  bool   // an intercepted ^L asked to clear history
 	width     int    // current terminal width, updated on SIGWINCH
 	height    int    // current terminal height, updated on SIGWINCH
+
+	// Copy overlay. While copyActive, stdin is consumed by the overlay and pty
+	// output stays in buffer; compose skips draining it. sel indexes history
+	// (representative block of a collapsed run).
+	copyActive  bool
+	sel         int
+	copyPend    []byte
+	copyPending bool
+	copySel     int
 
 	vt      vt10x.Terminal
 	history []block
@@ -128,15 +142,16 @@ func run(c *cli.Context) error {
 	}
 
 	s := &session{
-		vt:     vt10x.New(vt10x.WithSize(width, height)),
-		first:  true,
-		dirty:  true,
-		width:  width,
-		height: height,
-		events: make(chan struct{}, 1),
-		log:    log,
-		master: master,
-		cmd:    cmd,
+		vt:      vt10x.New(vt10x.WithSize(width, height)),
+		first:   true,
+		dirty:   true,
+		width:   width,
+		height:  height,
+		copySel: -1,
+		events:  make(chan struct{}, 1),
+		log:     log,
+		master:  master,
+		cmd:     cmd,
 	}
 
 	go s.forwardStdin() // stdin -> pty
@@ -153,34 +168,54 @@ func run(c *cli.Context) error {
 	return cli.Exit("", code)
 }
 
-// forwardStdin is the stdin -> pty goroutine. Keystrokes are forwarded to the
-// shell, except a pure ^L read at the idle prompt (empty buffer, past the
-// bootstrap prompt, not in a fullscreen app), which clears history instead.
+// forwardStdin is the stdin -> pty goroutine. Reads are routed by routeStdin:
+// copy-mode consumes them, a pure ^^ at the idle prompt opens the overlay, a
+// pure ^L at the idle prompt clears history, and everything else goes to the
+// shell.
 func (s *session) forwardStdin() {
 	buf := make([]byte, 32768)
 	for {
 		n, err := os.Stdin.Read(buf)
 		if n > 0 {
-			data := buf[:n]
-			if onlyHasCtrlLs(data) {
-				s.mu.Lock()
-				if len(s.buffer) == 0 && !s.first && !s.alt {
-					s.clearReq = true
-					s.mu.Unlock()
-					s.log.event("ctrll")
-					s.wake()
-					continue
-				}
-				s.mu.Unlock()
-			}
-			s.log.tx(data)
-			_, _ = s.master.Write(data)
+			s.routeStdin(buf[:n])
 		}
 		if err != nil {
 			// stdin closed: stop forwarding, but let the shell finish.
 			return
 		}
 	}
+}
+
+// routeStdin delivers one stdin read to exactly one destination. The idle gate
+// (empty buffer, past the bootstrap prompt, not in alt-screen) is what keeps
+// the copy trigger from ever shadowing a running command or a fullscreen app.
+func (s *session) routeStdin(data []byte) {
+	s.mu.Lock()
+	if s.copyActive {
+		s.mu.Unlock()
+		s.handleCopyInput(data)
+		return
+	}
+	if onlyHasCopyKeys(data) &&
+		len(s.buffer) == 0 && !s.first && !s.alt && len(s.history) > 0 {
+		s.copyActive = true
+		s.sel = len(s.history) - 1
+		s.copyPend = nil
+		s.dirty = true
+		s.mu.Unlock()
+		s.wake()
+		return
+	}
+	if onlyHasCtrlLs(data) && len(s.buffer) == 0 && !s.first && !s.alt {
+		s.clearReq = true
+		s.mu.Unlock()
+		s.log.event("ctrll")
+		s.wake()
+		return
+	}
+	s.mu.Unlock()
+	s.log.tx(data)
+	_, _ = s.master.Write(data)
 }
 
 // readPty is the pty -> buffer goroutine. hold guarantees a prompt-marker head
@@ -249,6 +284,7 @@ func (s *session) loop() {
 			s.log.event("SIGTERM")
 			return
 		}
+		s.flushCopy()
 		if s.renderMaybe() && s.done() {
 			return
 		}
@@ -272,19 +308,30 @@ func (s *session) renderMaybe() bool {
 	return true
 }
 
-// needsRender reports whether the frame is out of date.
+// needsRender reports whether the frame is out of date. While the copy overlay
+// is active only an explicit dirty flag forces a repaint: pty output is held in
+// buffer and must not update the frozen frame.
 func (s *session) needsRender() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.copyActive {
+		return s.dirty
+	}
 	return s.dirty || len(s.buffer) > 0 || s.final || s.clearReq
 }
 
 // compose turns staged pty bytes into emulator state: it drains the buffer into
 // vt, freezing a command at each prompt marker, flushes the final command at
-// EOF, then leaves the frame marked clean.
+// EOF, then leaves the frame marked clean. While the copy overlay is active the
+// buffer is deliberately left untouched so nothing changes behind the overlay.
 func (s *session) compose() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.copyActive {
+		s.dirty = false
+		return
+	}
 
 	if s.clearReq {
 		s.clearReq = false
@@ -340,7 +387,37 @@ func (s *session) freezeFinal() {
 
 // paint writes the minimal frame that brings the terminal up to date.
 func (s *session) paint() {
-	os.Stdout.Write(s.rend.frame(s.history, s.vt, s.width, s.height))
+	s.mu.Lock()
+	his, vt := s.history, s.vt
+	w, h := s.width, s.height
+	var ov *overlay
+	if s.copyActive {
+		ov = &overlay{sel: s.sel}
+	}
+	s.mu.Unlock()
+
+	out := s.rend.frame(his, vt, w, h, ov)
+	outMu.Lock()
+	_, _ = os.Stdout.Write(out)
+	outMu.Unlock()
+}
+
+// flushCopy performs a clipboard write requested by the overlay. It runs on the
+// loop goroutine so the OSC 52 fallback shares outMu with painting.
+func (s *session) flushCopy() {
+	s.mu.Lock()
+	if !s.copyPending {
+		s.mu.Unlock()
+		return
+	}
+	i := s.copySel
+	s.copyPending = false
+	var text string
+	if i >= 0 && i < len(s.history) {
+		text = blockText(s.history[i].cells)
+	}
+	s.mu.Unlock()
+	setClipboard(text)
 }
 
 // resize applies a new terminal size to both the pty and the emulator, and

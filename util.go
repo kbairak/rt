@@ -33,6 +33,20 @@ func onlyHasCtrlLs(data []byte) bool {
 	return true
 }
 
+// onlyHasCopyKeys reports whether data is a non-empty run of the copy trigger
+// byte (CTRL-^, 0x1e). Empty and mixed reads are false.
+func onlyHasCopyKeys(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	for _, b := range data {
+		if b != copyKey {
+			return false
+		}
+	}
+	return true
+}
+
 // parseInt parses a non-negative decimal integer; ok is false on an empty
 // string or any non-digit byte.
 func parseInt(s string) (int, bool) {

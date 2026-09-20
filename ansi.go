@@ -37,6 +37,8 @@ const (
 	ansiHideCursor  = "\x1b[?25l"
 	ansiShowCursor  = "\x1b[?25h"
 	ansiReset       = "\x1b[0m"
+	ansiReverse     = "\x1b[7m"
+	ansiGreen       = "\x1b[32m"
 	ansiClearScreen = "\x1b[H\x1b[2J"
 	ansiClearLine   = "\x1b[K"
 )
