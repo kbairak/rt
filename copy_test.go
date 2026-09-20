@@ -524,3 +524,40 @@ func TestFilterMatchesHiddenLines(t *testing.T) {
 		t.Fatalf("filter on collapsed-away line must match: %d", len(got))
 	}
 }
+
+func TestDecodeOverlayReplay(t *testing.T) {
+	acts, _ := decodeOverlay(nil, []byte("r"))
+	if !actsEqual(acts, []overlayAction{ovReplay}) {
+		t.Fatalf("r: %v", acts)
+	}
+}
+
+func TestAppendBlockCollapseKeepsNewestTx(t *testing.T) {
+	b1 := mkBlock('A', 4)
+	b1.tx = []byte("one\r")
+	b2 := mkBlock('A', 4)
+	b2.tx = []byte("two\r")
+	s := &session{}
+	s.appendBlock(b1)
+	s.appendBlock(b2)
+	if len(s.history) != 1 || s.history[0].count != 2 {
+		t.Fatalf("entries=%d count=%d", len(s.history), s.history[0].count)
+	}
+	if got := string(s.history[0].tx); got != "two\r" {
+		t.Fatalf("tx=%q want newest", got)
+	}
+}
+
+func TestReplayAction(t *testing.T) {
+	b := mkBlock('A', 4)
+	b.tx = []byte("ls\r")
+	s := &session{history: []block{b}, view: []block{b}, copyActive: true, sel: 0, height: 10}
+
+	s.handleCopyInput([]byte("r"))
+	if s.copyActive || !s.replayPending {
+		t.Fatalf("active=%v pending=%v", s.copyActive, s.replayPending)
+	}
+	if got := string(s.replayTx); got != "ls\r" {
+		t.Fatalf("replayTx=%q want ls\\r", got)
+	}
+}

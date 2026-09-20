@@ -42,6 +42,7 @@ const (
 	ovPageUp
 	ovSearch
 	ovToggleCollapse
+	ovReplay
 	ovCopy
 	ovCancel
 )
@@ -132,6 +133,8 @@ func decodeOverlay(pend, data []byte) (acts []overlayAction, pending []byte) {
 			acts = append(acts, ovSearch)
 		case 'c':
 			acts = append(acts, ovToggleCollapse)
+		case 'r':
+			acts = append(acts, ovReplay)
 		case '\r', '\n', 'y':
 			acts = append(acts, ovCopy)
 		case 'q', 0x07, 0x03, copyKey:
@@ -195,6 +198,14 @@ func (s *session) handleCopyInput(data []byte) {
 		case ovToggleCollapse:
 			s.collapsed = !s.collapsed
 			adjust = true
+		case ovReplay:
+			s.replayPending = true
+			s.replayTx = nil
+			if s.sel >= 0 && s.sel < len(s.view) {
+				s.replayTx = s.view[s.sel].tx
+			}
+			s.closeOverlay()
+			return
 		case ovCopy:
 			s.copyPending = true
 			s.copySel = s.sel
@@ -542,7 +553,7 @@ func overlayStatus(ov *overlay, total, width int) string {
 		if ov.filter != "" {
 			text += "  /" + ov.filter
 		}
-		text += "   ⏎/y copy   j/k move   ^u/^d page   / filter   c collapse/expand   esc cancel"
+		text += "   ⏎/y copy   r replay   j/k move   ^u/^d page   / filter   c collapse/expand   esc cancel"
 	}
 	return reverseLine(text, width)
 }

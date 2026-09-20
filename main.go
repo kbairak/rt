@@ -24,13 +24,15 @@ var outMu sync.Mutex
 
 // block is a finished command frozen as a cell grid. count is the number of
 // consecutive identical commands this entry represents; they are collapsed at
-// append time to save memory.
+// append time to save memory. tx is the raw stdin fed to the pty while the
+// command was active, replayable in copy mode.
 type block struct {
 	cells [][]vt10x.Glyph
 	width int
 	code  int
 	count int
 	hash  uint64
+	tx    []byte
 }
 
 // session is the state of a running rt session plus the operations the three
@@ -58,19 +60,22 @@ type session struct {
 	// Copy overlay. While copyActive, stdin is consumed by the overlay and pty
 	// output stays in buffer; compose skips draining it. sel/scroll index view,
 	// the filtered entry list (view == history when no filter is applied).
-	copyActive   bool
-	sel          int
-	scroll       int
-	view         []block // filtered entries copy-mode renders/navigates
-	filter       string  // applied search query (empty = none)
-	searchActive bool
-	query        string
-	searchPend   []byte
-	collapsed    bool // collapse blocks to their first collapsedLines rows
-	copyPend     []byte
-	copyPending  bool
-	copySel      int
-	copyText     string
+	copyActive    bool
+	sel           int
+	scroll        int
+	view          []block // filtered entries copy-mode renders/navigates
+	filter        string  // applied search query (empty = none)
+	searchActive  bool
+	query         string
+	searchPend    []byte
+	collapsed     bool // collapse blocks to their first collapsedLines rows
+	copyPend      []byte
+	copyPending   bool
+	copySel       int
+	copyText      string
+	replayPending bool
+	replayTx      []byte
+	curTx         []byte // stdin fed to the pty for the in-progress block
 
 	vt      vt10x.Terminal
 	history []block
@@ -83,6 +88,7 @@ type session struct {
 
 	log    *recorder
 	master *os.File
+	ptyMu  sync.Mutex // serializes writes to master (stdin path vs replay)
 	cmd    *exec.Cmd
 }
 
@@ -232,8 +238,29 @@ func (s *session) routeStdin(data []byte) {
 		return
 	}
 	s.mu.Unlock()
+	s.forward(data)
+}
+
+// txCap bounds the per-block input record so a huge paste cannot grow memory
+// without limit; bytes past the cap are forwarded but not retained.
+const txCap = 256 << 10
+
+// forward delivers stdin bytes to the pty, records them in the in-progress
+// block's replay buffer, and logs them. It is used by the stdin path and by
+// replay itself.
+func (s *session) forward(data []byte) {
+	s.mu.Lock()
+	if len(s.curTx) < txCap {
+		s.curTx = append(s.curTx, data...)
+		if len(s.curTx) > txCap {
+			s.curTx = s.curTx[:txCap]
+		}
+	}
+	s.mu.Unlock()
 	s.log.tx(data)
+	s.ptyMu.Lock()
 	_, _ = s.master.Write(data)
+	s.ptyMu.Unlock()
 }
 
 // readPty is the pty -> buffer goroutine. hold guarantees a prompt-marker head
@@ -303,6 +330,7 @@ func (s *session) loop() {
 			return
 		}
 		s.flushCopy()
+		s.flushReplay()
 		if s.renderMaybe() && s.done() {
 			return
 		}
@@ -378,9 +406,12 @@ func (s *session) compose() {
 func (s *session) freezeCommand(code int) {
 	s.log.event("sep")
 	s.dirty = true
+	tx := s.curTx
+	s.curTx = nil
 	if !s.first {
 		if g, _, _ := snapshotGrid(s.vt); g != nil {
 			b := newBlock(g, s.width, code)
+			b.tx = tx
 			if s.appendBlock(b) {
 				s.log.block(len(s.history), blockText(b.cells))
 			}
@@ -394,8 +425,11 @@ func (s *session) freezeCommand(code int) {
 // freezeFinal freezes the still-unfinished command as the last block when the
 // pty hits EOF. Caller holds s.mu.
 func (s *session) freezeFinal() {
+	tx := s.curTx
+	s.curTx = nil
 	if g, _, _ := snapshotGrid(s.vt); g != nil {
 		b := newBlock(g, s.width, s.finalCode)
+		b.tx = tx
 		if s.appendBlock(b) {
 			s.log.event("block " + itoa(len(s.history)) + " (final)")
 			s.log.block(len(s.history), blockText(b.cells))
@@ -406,11 +440,13 @@ func (s *session) freezeFinal() {
 }
 
 // appendBlock adds b to history, collapsing it into the newest entry when the
-// grids are identical (incrementing that entry's count) instead of storing a
-// duplicate. It reports whether a new entry was created. Caller holds s.mu.
+// grids are identical (incrementing that entry's count and keeping the newest
+// input record) instead of storing a duplicate. It reports whether a new entry
+// was created. Caller holds s.mu.
 func (s *session) appendBlock(b block) bool {
 	if n := len(s.history); n > 0 && blocksEqual(s.history[n-1], b) {
 		s.history[n-1].count++
+		s.history[n-1].tx = b.tx
 		return false
 	}
 	s.history = append(s.history, b)
@@ -455,6 +491,25 @@ func (s *session) flushCopy() {
 	s.copyText = ""
 	s.mu.Unlock()
 	setClipboard(text)
+}
+
+// flushReplay feeds a replay requested by the overlay to the pty. It runs on
+// the loop goroutine; the overlay only opens at the idle gate, so the shell is
+// waiting for input.
+func (s *session) flushReplay() {
+	s.mu.Lock()
+	if !s.replayPending {
+		s.mu.Unlock()
+		return
+	}
+	tx := s.replayTx
+	s.replayPending = false
+	s.replayTx = nil
+	alt := s.alt
+	s.mu.Unlock()
+	if len(tx) > 0 && !alt {
+		s.forward(tx)
+	}
 }
 
 // resize applies a new terminal size to both the pty and the emulator, and
