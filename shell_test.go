@@ -73,6 +73,10 @@ func TestDetectMode(t *testing.T) {
 		{"python3 bare", "python3", "python", false},
 		{"python3 versioned", "/usr/local/bin/python3.13", "python", false},
 		{"python bare", "python", "python", false},
+		{"ipython path", "/usr/bin/ipython", "ipython", false},
+		{"ipython bare", "ipython", "ipython", false},
+		{"ipython3 path", "/usr/local/bin/ipython3", "ipython", false},
+		{"ipython3 versioned", "/usr/local/bin/ipython3.13", "ipython", false},
 		{"python3-config unsupported", "/usr/bin/python3-config", "", true},
 		{"dash unsupported", "/bin/dash", "", true},
 	}
@@ -103,6 +107,8 @@ func TestResolveMode(t *testing.T) {
 		{"explicit bash", "bash", "/bin/sh", "bash", false},
 		{"empty infers python", "", "/usr/bin/python3", "python", false},
 		{"explicit python", "python", "/bin/sh", "python", false},
+		{"empty infers ipython", "", "/usr/bin/ipython", "ipython", false},
+		{"explicit ipython", "ipython", "/bin/sh", "ipython", false},
 		{"bad mode", "fish", "/bin/zsh", "", true},
 	}
 	for _, c := range cases {
@@ -274,6 +280,42 @@ func TestGetCmdPython(t *testing.T) {
 	}
 	startup := string(b)
 	for _, want := range []string{ansiRtPayload, "_RtPrompt", "sys.excepthook", "RT_REAL_PYTHONSTARTUP"} {
+		if !strings.Contains(startup, want) {
+			t.Fatalf("startup missing %q:\n%s", want, startup)
+		}
+	}
+	dir := filepath.Dir(startupPath)
+	cleanup()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("temp dir %s not removed: %v", dir, err)
+	}
+}
+
+func TestGetCmdIPython(t *testing.T) {
+	t.Setenv("PYTHONSTARTUP", "/x/y")
+	cmd, cleanup, err := getCmd("/usr/bin/ipython", "ipython")
+	if err != nil {
+		t.Fatalf("getCmd: %v", err)
+	}
+	if cmd.Args[0] != "/usr/bin/ipython" {
+		t.Fatalf("Args[0] = %q, want /usr/bin/ipython", cmd.Args[0])
+	}
+	if v := envValue(cmd.Env, "RT_REAL_PYTHONSTARTUP"); v != "/x/y" {
+		t.Fatalf("RT_REAL_PYTHONSTARTUP = %q, want /x/y", v)
+	}
+	if v := envValue(cmd.Env, "PYTHON_BASIC_REPL"); v != "" {
+		t.Fatalf("PYTHON_BASIC_REPL = %q, want unset", v)
+	}
+	startupPath := envValue(cmd.Env, "PYTHONSTARTUP")
+	if startupPath == "" {
+		t.Fatal("PYTHONSTARTUP not set")
+	}
+	b, err := os.ReadFile(startupPath)
+	if err != nil {
+		t.Fatalf("read startup: %v", err)
+	}
+	startup := string(b)
+	for _, want := range []string{ansiRtPayload, "post_run_cell", "events.register", "os.write", "RT_REAL_PYTHONSTARTUP"} {
 		if !strings.Contains(startup, want) {
 			t.Fatalf("startup missing %q:\n%s", want, startup)
 		}

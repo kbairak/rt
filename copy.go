@@ -1,6 +1,9 @@
 package main
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 // copyKey is the byte that opens the copy overlay at the idle prompt: CTRL-^
 // (0x1e). It is unbound in readline emacs mode, zsh vi mode, bash, Python
@@ -265,6 +268,7 @@ type searchEventKind int
 const (
 	seRune searchEventKind = iota
 	seBackspace
+	seKillWord
 	seApply
 	seCancel
 )
@@ -320,6 +324,8 @@ func decodeSearch(pend, data []byte) (evs []searchEvent, pending []byte) {
 			evs = append(evs, searchEvent{kind: seApply})
 		case b == 0x7f || b == 0x08:
 			evs = append(evs, searchEvent{kind: seBackspace})
+		case b == 0x17:
+			evs = append(evs, searchEvent{kind: seKillWord})
 		case b >= 0x20 && b <= 0x7e:
 			evs = append(evs, searchEvent{kind: seRune, r: rune(b)})
 		}
@@ -346,6 +352,11 @@ func (s *session) handleSearchInput(data []byte) {
 		case seBackspace:
 			if r := []rune(s.query); len(r) > 0 {
 				s.query = string(r[:len(r)-1])
+				changed = true
+			}
+		case seKillWord:
+			if w := killWord(s.query); w != s.query {
+				s.query = w
 				changed = true
 			}
 		case seApply:
@@ -380,6 +391,20 @@ func (s *session) handleSearchInput(data []byte) {
 		s.dirty = true
 		s.wake()
 	}
+}
+
+// killWord removes the last word from q: trailing whitespace, then the
+// non-whitespace run before it, mirroring readline's backward-kill-word.
+func killWord(q string) string {
+	r := []rune(q)
+	i := len(r)
+	for i > 0 && unicode.IsSpace(r[i-1]) {
+		i--
+	}
+	for i > 0 && !unicode.IsSpace(r[i-1]) {
+		i--
+	}
+	return string(r[:i])
 }
 
 // filterHistory returns the entries whose plain text contains q (case
@@ -544,7 +569,7 @@ func cropText(s string, width int) string {
 func overlayStatus(ov *overlay, total, width int) string {
 	var text string
 	if ov.searching {
-		text = "SEARCH " + ov.query + "   ⏎ apply   esc clear"
+		text = "SEARCH " + ov.query + "   ⏎ apply   ^w word   esc clear"
 	} else {
 		text = "COPY"
 		if total > 0 {

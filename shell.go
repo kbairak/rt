@@ -40,6 +40,8 @@ func getCmd(shell, mode string) (*exec.Cmd, func(), error) {
 		return shCmd(shell)
 	case "python":
 		return pythonCmd(shell)
+	case "ipython":
+		return ipythonCmd(shell)
 	default:
 		return nil, nil, fmt.Errorf("unsupported mode %q", mode)
 	}
@@ -231,6 +233,61 @@ func pythonCmd(shell string) (*exec.Cmd, func(), error) {
 		"PYTHONSTARTUP="+path,
 		"RT_REAL_PYTHONSTARTUP="+realStartup,
 		"PYTHON_BASIC_REPL=1",
+		"REVERSE_TERMINAL=1",
+	)
+	return cmd, cleanup, nil
+}
+
+// ipythonCmd runs IPython interactively with PYTHONSTARTUP pointed at a
+// generated shim that runs the user's original startup (if any), then registers
+// a post_run_cell hook that writes the separator (with the cell's status) to
+// the terminal. IPython execs PYTHONSTARTUP by default and keeps the real
+// IPYTHONDIR/profile, so user config and startup files are untouched. The
+// marker is written with os.write(1, ...) rather than sys.stdout: run_cell
+// wraps execution in a tee that patches sys.stdout.write, and a plain write
+// would pollute the output history cache. A startup marker delimits the
+// bootstrap banner as its own (discarded) block. The real startup is preserved
+// via RT_REAL_PYTHONSTARTUP.
+func ipythonCmd(shell string) (*exec.Cmd, func(), error) {
+	dir, err := os.MkdirTemp("", "rt-*")
+	if err != nil {
+		return nil, nil, err
+	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+	path := filepath.Join(dir, "startup.py")
+	startup := fmt.Sprintf(strings.Join([]string{
+		`# rt: run the user's real PYTHONSTARTUP, then install the prompt marker.`,
+		`import os, sys`,
+		"",
+		`_rt_real = os.environ.get("RT_REAL_PYTHONSTARTUP", "")`,
+		`if _rt_real and os.path.isfile(_rt_real):`,
+		`    exec(compile(open(_rt_real).read(), _rt_real, "exec"), globals())`,
+		"",
+		`_rt_ip = get_ipython()`,
+		`_rt_head = b"\x1b]%s;"`,
+		"",
+		`def _rt_emit(_rt_code):`,
+		`    os.write(1, _rt_head + str(_rt_code).encode() + b"\x07")`,
+		"",
+		`def _rt_post(_rt_result):`,
+		`    try:`,
+		`        _rt_emit(0 if (_rt_result is not None and _rt_result.success) else 1)`,
+		`    except Exception:`,
+		`        pass`,
+		"",
+		`_rt_ip.events.register("post_run_cell", _rt_post)`,
+		`_rt_emit(0)`,
+		"",
+	}, "\n"), ansiRtPayload)
+	if werr := os.WriteFile(path, []byte(startup), 0o600); werr != nil {
+		cleanup()
+		return nil, nil, werr
+	}
+	realStartup := os.Getenv("PYTHONSTARTUP")
+	cmd := exec.Command(shell)
+	cmd.Env = withEnv(os.Environ(),
+		"PYTHONSTARTUP="+path,
+		"RT_REAL_PYTHONSTARTUP="+realStartup,
 		"REVERSE_TERMINAL=1",
 	)
 	return cmd, cleanup, nil

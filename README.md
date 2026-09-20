@@ -178,5 +178,5 @@ Notes:
 - [x] Repaint perf debt: `\x1b[2J` + full redraw every tick; nvim/htop-class apps tear and burn CPU. Compute cell diff between frames, emit changed rows only
   - [x] Drop `2J`; renderer keeps previous frame, emits only changed rows, erases stale rows with `\x1b[K`, full-clears only on first frame or resize
   - [x] Wrap each update in DEC 2026 synchronized update so capable terminals render atomically (others ignore)
-- [ ] History scroll from prompt: PgUp/PgDn (or C-b/C-f) at idle prompt pans the block list. Gate on `inAltScreen`
+- [x] History scroll from prompt: PgUp/PgDn (or C-b/C-f) at idle prompt pans the block list. Gate on `inAltScreen`
 - [ ] Terminal query caps (document, don't fix yet): vt10x ignores DA1/`\x1b[c`, OSC 10/11 dynamic colors, cursor-shape demand; apps fall back to 256-color

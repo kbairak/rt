@@ -100,7 +100,11 @@ func main() {
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name: "mode", Aliases: []string{"m"},
-				Usage: "shell mode: sh|zsh|bash|python (default: inferred from shell)",
+				Usage: "shell mode: sh|zsh|bash|python|ipython (default: inferred from shell)",
+			},
+			&cli.BoolFlag{
+				Name:  "log",
+				Usage: "write a timestamped rt-<time>.log of all bytes and events",
 			},
 		},
 		Action: run,
@@ -142,9 +146,12 @@ func run(c *cli.Context) error {
 		width, height = 80, 24
 	}
 
-	log, err := newRecorder()
-	if err != nil {
-		return fmt.Errorf("recorder: %w", err)
+	var log *recorder
+	if c.Bool("log") {
+		log, err = newRecorder()
+		if err != nil {
+			return fmt.Errorf("recorder: %w", err)
+		}
 	}
 
 	cmd, cleanup, err := getCmd(shell, mode)

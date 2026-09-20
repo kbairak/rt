@@ -31,6 +31,9 @@ func newRecorder() (*recorder, error) {
 }
 
 func (r *recorder) Close() {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	r.w.Flush()
 	r.f.Close()
@@ -39,6 +42,9 @@ func (r *recorder) Close() {
 
 // event logs a synthetic lifecycle marker.
 func (r *recorder) event(what string) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	fmt.Fprintf(r.w, "%7.1fms --           EVENT     %s\n", msSince(r.init), what)
@@ -46,6 +52,9 @@ func (r *recorder) event(what string) {
 
 // tx logs host-stdin bytes forwarded into the pty.
 func (r *recorder) tx(b []byte) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	start := r.txN + 1
@@ -55,6 +64,9 @@ func (r *recorder) tx(b []byte) {
 
 // rx logs pty output read by rt.
 func (r *recorder) rx(b []byte) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	start := r.rxN + 1
@@ -65,6 +77,9 @@ func (r *recorder) rx(b []byte) {
 // block logs a finished block's plain-text content, indented so it stands apart
 // from the TX/RX/EVENT lines.
 func (r *recorder) block(i int, text string) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	fmt.Fprintf(r.w, "%7.1fms --           BLOCK     #%d\n", msSince(r.init), i)

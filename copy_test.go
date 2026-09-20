@@ -389,6 +389,28 @@ func TestDecodeSearch(t *testing.T) {
 	if len(evs) != 0 || len(pend) != 0 {
 		t.Fatalf("split tail: evs=%v pend=%q", evs, pend)
 	}
+
+	evs, _ = decodeSearch(nil, []byte("\x17"))
+	if !kindsEqual(searchKinds(evs), []searchEventKind{seKillWord}) {
+		t.Fatalf("ctrl-w: %v", evs)
+	}
+}
+
+func TestKillWord(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"foo bar", "foo "},
+		{"foo ", ""},
+		{"foo   ", ""},
+		{"foo", ""},
+		{"", ""},
+		{"  ", ""},
+		{"a b  c", "a b  "},
+	}
+	for _, c := range cases {
+		if got := killWord(c.in); got != c.want {
+			t.Fatalf("killWord(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
 }
 
 // mkText builds a one-row block from a string.
@@ -435,6 +457,24 @@ func TestSearchApplyAndCancel(t *testing.T) {
 	s.handleSearchInput([]byte("\x1b"))
 	if s.searchActive || s.filter != "" || len(s.view) != len(his) || s.sel != len(his)-1 {
 		t.Fatalf("cancel: active=%v filter=%q view=%d sel=%d", s.searchActive, s.filter, len(s.view), s.sel)
+	}
+}
+
+func TestSearchKillWord(t *testing.T) {
+	his := []block{mkText("hello world", 16)}
+	s := &session{history: his, view: his, copyActive: true, searchActive: true, height: 10}
+
+	s.handleSearchInput([]byte("foo bar"))
+	if s.query != "foo bar" {
+		t.Fatalf("typing: query=%q", s.query)
+	}
+	s.handleSearchInput([]byte("\x17"))
+	if s.query != "foo " {
+		t.Fatalf("first ^w: query=%q", s.query)
+	}
+	s.handleSearchInput([]byte("\x17"))
+	if s.query != "" {
+		t.Fatalf("second ^w: query=%q", s.query)
 	}
 }
 

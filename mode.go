@@ -34,8 +34,10 @@ func detectMode(shell string) (string, error) {
 		return "sh", nil
 	case base == "python" || base == "python3" || strings.HasPrefix(base, "python3."):
 		return "python", nil
+	case base == "ipython" || base == "ipython3" || strings.HasPrefix(base, "ipython3."):
+		return "ipython", nil
 	default:
-		return "", fmt.Errorf("unsupported shell %q: use --mode sh|zsh|bash|python", shell)
+		return "", fmt.Errorf("unsupported shell %q: use --mode sh|zsh|bash|python|ipython", shell)
 	}
 }
 
@@ -43,10 +45,10 @@ func detectMode(shell string) (string, error) {
 func resolveMode(c *cli.Context) (string, error) {
 	if flagMode := c.String("mode"); flagMode != "" {
 		switch flagMode {
-		case "sh", "zsh", "bash", "python":
+		case "sh", "zsh", "bash", "python", "ipython":
 			return flagMode, nil
 		default:
-			return "", fmt.Errorf("unsupported mode %q: use --mode sh|zsh|bash|python", flagMode)
+			return "", fmt.Errorf("unsupported mode %q: use --mode sh|zsh|bash|python|ipython", flagMode)
 		}
 	}
 	return detectMode(resolveShell(c))
