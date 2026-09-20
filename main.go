@@ -50,6 +50,7 @@ type session struct {
 	vt      vt10x.Terminal
 	history []block
 	dirty   bool
+	rend    renderer
 
 	events     chan struct{} // loop wakeups (cap 1, coalesced)
 	frameTimer *time.Timer   // trailing repaint after the rate-limit window
@@ -337,9 +338,9 @@ func (s *session) freezeFinal() {
 	s.vt = vt10x.New(vt10x.WithSize(s.width, s.height))
 }
 
-// paint writes the whole frame to the real terminal.
+// paint writes the minimal frame that brings the terminal up to date.
 func (s *session) paint() {
-	os.Stdout.Write(renderFrame(s.history, s.vt, s.width, s.height))
+	os.Stdout.Write(s.rend.frame(s.history, s.vt, s.width, s.height))
 }
 
 // resize applies a new terminal size to both the pty and the emulator, and

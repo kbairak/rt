@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
-	"fmt"
 	"hash/fnv"
 	"strings"
 
@@ -178,64 +177,96 @@ func snapshotGrid(vt vt10x.Terminal) ([][]vt10x.Glyph, int, int) {
 	return grid[:last+1], cx, cy
 }
 
-// renderFrame builds the full frame: hide cursor, clear, draw the live
-// emulator grid, then history blocks newest-first with a header row, cropped to
-// terminal height, and plant the cursor at the live emulator cursor.
-func renderFrame(his []block, vt vt10x.Terminal, width, height int) []byte {
-	var frame bytes.Buffer
-	rows, cols := height, width
-
+// compose builds every screen row as ANSI bytes: the live emulator grid first,
+// then history blocks newest-first with a header row, cropped to height. Rows
+// past the content are nil. It also returns the live emulator cursor position.
+func compose(his []block, vt vt10x.Terminal, width, height int) ([][]byte, int, int) {
+	rows := make([][]byte, height)
 	grid, cx, cy := snapshotGrid(vt)
 
-	// hide cursor, clear screen
-	frame.WriteString(ansiHideCursor + ansiClearScreen)
-
 	var line bytes.Buffer
-	grow := func(y int, row []vt10x.Glyph, width int) {
+	put := func(y int, row []vt10x.Glyph, width int) {
 		line.Reset()
 		cellRow(&line, row, width)
-		fmt.Fprintf(&frame, "%s%s", ansiCursorPos(y, 0), line.Bytes())
+		rows[y] = append([]byte(nil), line.Bytes()...)
 	}
 
 	y := 0
 	if grid != nil {
-		for r := 0; r < len(grid); r++ {
-			if y >= rows {
-				break
-			}
-			grow(y, grid[r], cols)
+		for r := 0; r < len(grid) && y < height; r++ {
+			put(y, grid[r], width)
 			y++
 		}
 	}
 
-	for k := len(his) - 1; k >= 0; k-- {
-		if y >= rows {
-			break
-		}
+	for k := len(his) - 1; k >= 0 && y < height; k-- {
 		b := his[k]
 		rep := 1
 		for j := k - 1; j >= 0 && blocksEqual(b, his[j]); j-- {
 			rep++
 		}
 		k -= rep - 1 // skip the older, now-collapsed duplicates
-		fmt.Fprintf(&frame, "%s%s", ansiCursorPos(y, 0), sepText(rep, b.code, cols))
+		rows[y] = []byte(sepText(rep, b.code, width))
 		y++
-		for r := 0; r < len(b.cells); r++ {
-			if y >= rows {
-				break
+		for r := 0; r < len(b.cells) && y < height; r++ {
+			w := b.width
+			if w > width {
+				w = width
 			}
-			width := b.width
-			if width > cols {
-				width = cols
-			}
-			grow(y, b.cells[r], width)
+			put(y, b.cells[r], w)
 			y++
 		}
 	}
+	return rows, cx, cy
+}
 
-	// plant cursor at the live emulator cursor, show it
-	frame.WriteString(ansiCursorPos(cy, cx) + ansiShowCursor)
-	return frame.Bytes()
+// renderer diffs successive frames and emits only the rows that changed,
+// wrapped in a synchronized update. It is owned by the loop goroutine, like
+// vt and history.
+type renderer struct {
+	prev   [][]byte
+	width  int
+	height int
+	init   bool
+}
+
+// frame composes the current screen and returns the minimal byte stream that
+// brings the real terminal up to date: a full clear on the first frame or a
+// size change, otherwise only the changed rows. The cursor position is always
+// emitted. The whole update is wrapped in DEC 2026 so capable terminals render
+// it atomically; others ignore the wrapper.
+func (r *renderer) frame(his []block, vt vt10x.Terminal, width, height int) []byte {
+	rows, cx, cy := compose(his, vt, width, height)
+
+	var body bytes.Buffer
+	if !r.init || width != r.width || height != r.height || len(r.prev) != height {
+		body.WriteString(ansiClearScreen)
+		r.prev = make([][]byte, height)
+		r.init = true
+	}
+	r.width, r.height = width, height
+
+	body.WriteString(ansiHideCursor)
+	for y := 0; y < height; y++ {
+		var cur []byte
+		if y < len(rows) {
+			cur = rows[y]
+		}
+		if bytes.Equal(cur, r.prev[y]) {
+			continue
+		}
+		body.WriteString(ansiCursorPos(y, 0))
+		body.Write(cur)
+		body.WriteString(ansiClearLine)
+		r.prev[y] = append([]byte(nil), cur...)
+	}
+	body.WriteString(ansiCursorPos(cy, cx) + ansiShowCursor)
+
+	frame := make([]byte, 0, len(body.Bytes())+len(ansiSyncBegin)+len(ansiSyncEnd))
+	frame = append(frame, ansiSyncBegin...)
+	frame = append(frame, body.Bytes()...)
+	frame = append(frame, ansiSyncEnd...)
+	return frame
 }
 
 const (

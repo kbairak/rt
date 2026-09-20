@@ -38,6 +38,14 @@ const (
 	ansiShowCursor  = "\x1b[?25h"
 	ansiReset       = "\x1b[0m"
 	ansiClearScreen = "\x1b[H\x1b[2J"
+	ansiClearLine   = "\x1b[K"
+)
+
+// Synchronized update mode (DEC 2026): the terminal defers rendering until the
+// closing sequence. Terminals that do not support it ignore both harmlessly.
+const (
+	ansiSyncBegin = "\x1b[?2026h"
+	ansiSyncEnd   = "\x1b[?2026l"
 )
 
 // ansiOsc wraps a payload in an OSC sequence (ESC ] payload BEL).
