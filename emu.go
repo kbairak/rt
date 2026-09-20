@@ -190,16 +190,19 @@ func compose(his []block, vt vt10x.Terminal, width, height int, ov *overlay) ([]
 	grid, cx, cy := snapshotGrid(vt)
 
 	// In copy mode the leftmost column is a gutter, the bottom row is the
-	// status line, and history is scrolled by ov.scroll.
+	// status line, history is scrolled by ov.scroll, and blocks may be
+	// collapsed to their first collapsedLines content rows plus an indicator.
 	contentW := width
 	limit := height
 	skip := 0
+	collapsed := false
 	if ov != nil {
 		if contentW = width - 1; contentW < 0 {
 			contentW = 0
 		}
 		limit--
 		skip = ov.scroll
+		collapsed = ov.collapsed
 	}
 
 	var line bytes.Buffer
@@ -221,7 +224,7 @@ func compose(his []block, vt vt10x.Terminal, width, height int, ov *overlay) ([]
 	pos := 0 // running line index of the current entry's separator
 	for k := len(his) - 1; k >= 0 && y < limit; k-- {
 		b := his[k]
-		span := entryHeight(b)
+		span := entryHeight(b, collapsed)
 		start := pos
 		pos += span
 		if start+span-1 < skip {
@@ -242,6 +245,11 @@ func compose(his []block, vt vt10x.Terminal, width, height int, ov *overlay) ([]
 				gutter = ansiGreen + gutterLine + ansiReset
 			}
 		}
+		shown := len(b.cells)
+		capped := false
+		if collapsed && shown > collapsedLines {
+			shown, capped = collapsedLines, true
+		}
 		if skipEntry == 0 {
 			rows[y] = append([]byte(gutter), sepText(rep, b.code, contentW)...)
 			y++
@@ -250,12 +258,19 @@ func compose(his []block, vt vt10x.Terminal, width, height int, ov *overlay) ([]
 		if skipEntry >= 1 {
 			r0 = skipEntry - 1
 		}
-		for r := r0; r < len(b.cells) && y < limit; r++ {
+		if r0 > shown {
+			r0 = shown
+		}
+		for r := r0; r < shown && y < limit; r++ {
 			w := b.width
 			if w > contentW {
 				w = contentW
 			}
 			put(y, b.cells[r], w, gutter)
+			y++
+		}
+		if capped && y < limit {
+			rows[y] = append([]byte(gutter), cropText(moreText(len(b.cells)-shown), contentW)...)
 			y++
 		}
 	}

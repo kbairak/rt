@@ -11,16 +11,22 @@ const copyKey = 0x1e
 // the selected block.
 const gutterLine = "│"
 
+// collapsedLines is how many content rows a block shows when collapsed; the
+// rest are replaced by a single "N more lines" indicator.
+const collapsedLines = 7
+
 // overlay is the copy-mode view state handed to the renderer while active. sel
 // is an index into the visible view (0 = oldest); scroll is the first line shown
 // (0 = the newest entry's separator). searching/query drive the filter input
-// line; filter is the applied query (empty = none).
+// line; filter is the applied query (empty = none). collapsed caps each block to
+// collapsedLines content rows.
 type overlay struct {
 	sel       int
 	scroll    int
 	searching bool
 	query     string
 	filter    string
+	collapsed bool
 }
 
 // overlayAction is a decoded keystroke in copy mode.
@@ -35,6 +41,7 @@ const (
 	ovPageDown
 	ovPageUp
 	ovSearch
+	ovToggleCollapse
 	ovCopy
 	ovCancel
 )
@@ -123,6 +130,8 @@ func decodeOverlay(pend, data []byte) (acts []overlayAction, pending []byte) {
 			acts = append(acts, ovPageUp)
 		case '/':
 			acts = append(acts, ovSearch)
+		case 'c':
+			acts = append(acts, ovToggleCollapse)
 		case '\r', '\n', 'y':
 			acts = append(acts, ovCopy)
 		case 'q', 0x07, 0x03, copyKey:
@@ -183,6 +192,9 @@ func (s *session) handleCopyInput(data []byte) {
 			s.dirty = true
 			s.wake()
 			return
+		case ovToggleCollapse:
+			s.collapsed = !s.collapsed
+			adjust = true
 		case ovCopy:
 			s.copyPending = true
 			s.copySel = s.sel
@@ -198,7 +210,7 @@ func (s *session) handleCopyInput(data []byte) {
 		}
 	}
 	if adjust {
-		s.scroll = adjustScroll(s.view, s.sel, s.scroll, viewHeight(s.height))
+		s.scroll = adjustScroll(s.view, s.sel, s.scroll, viewHeight(s.height), s.collapsed)
 	}
 	s.dirty = true
 	s.wake()
@@ -214,7 +226,7 @@ func (s *session) page(delta int) {
 	if step < 1 {
 		step = 1
 	}
-	max := totalLines(s.view) - v
+	max := totalLines(s.view, s.collapsed) - v
 	if max < 0 {
 		max = 0
 	}
@@ -226,14 +238,14 @@ func (s *session) page(delta int) {
 	}
 	s.scroll = ns
 
-	if len(s.view) == 0 || blockFullyVisible(s.view, s.sel, ns, v) {
+	if len(s.view) == 0 || blockFullyVisible(s.view, s.sel, ns, v, s.collapsed) {
 		return
 	}
-	if k, ok := blockStartingAt(s.view, ns, v); ok {
+	if k, ok := blockStartingAt(s.view, ns, v, s.collapsed); ok {
 		s.sel = k
 		return
 	}
-	s.sel = blockAtLine(s.view, ns)
+	s.sel = blockAtLine(s.view, ns, s.collapsed)
 }
 
 // searchEventKind classifies a decoded search-mode keystroke.
@@ -383,26 +395,31 @@ func (s *session) closeOverlay() {
 }
 
 // entryHeight is the number of screen lines a history entry occupies: its
-// separator plus one line per grid row.
-func entryHeight(b block) int {
-	return 1 + len(b.cells)
+// separator, its content rows (capped when collapsed), and, for a collapsed
+// tall block, one indicator line.
+func entryHeight(b block, collapsed bool) int {
+	n := len(b.cells)
+	if collapsed && n > collapsedLines {
+		return 1 + collapsedLines + 1
+	}
+	return 1 + n
 }
 
 // totalLines is the total number of history lines in newest-first order.
-func totalLines(his []block) int {
+func totalLines(his []block, collapsed bool) int {
 	n := 0
 	for _, b := range his {
-		n += entryHeight(b)
+		n += entryHeight(b, collapsed)
 	}
 	return n
 }
 
 // topLine returns the line index of entry i's separator. Line 0 is the newest
 // entry's separator; older entries follow downward.
-func topLine(his []block, i int) int {
+func topLine(his []block, i int, collapsed bool) int {
 	t := 0
 	for j := len(his) - 1; j > i; j-- {
-		t += entryHeight(his[j])
+		t += entryHeight(his[j], collapsed)
 	}
 	return t
 }
@@ -418,43 +435,43 @@ func viewHeight(height int) int {
 
 // blockFullyVisible reports whether entry i (separator through last row) lies
 // entirely within the window [scroll, scroll+v).
-func blockFullyVisible(his []block, i, scroll, v int) bool {
+func blockFullyVisible(his []block, i, scroll, v int, collapsed bool) bool {
 	if i < 0 || i >= len(his) {
 		return false
 	}
-	t := topLine(his, i)
-	return t >= scroll && t+entryHeight(his[i]) <= scroll+v
+	t := topLine(his, i, collapsed)
+	return t >= scroll && t+entryHeight(his[i], collapsed) <= scroll+v
 }
 
 // blockStartingAt returns the topmost entry whose first line falls in the
 // window [scroll, scroll+v). ok is false when no entry starts in the window.
-func blockStartingAt(his []block, scroll, v int) (int, bool) {
+func blockStartingAt(his []block, scroll, v int, collapsed bool) (int, bool) {
 	pos := 0
 	for k := len(his) - 1; k >= 0; k-- {
 		if pos >= scroll {
 			return k, pos < scroll+v
 		}
-		pos += entryHeight(his[k])
+		pos += entryHeight(his[k], collapsed)
 	}
 	return 0, false
 }
 
 // blockAtLine returns the entry containing line, i.e. the one with the greatest
 // top line not after it.
-func blockAtLine(his []block, line int) int {
+func blockAtLine(his []block, line int, collapsed bool) int {
 	pos := 0
 	for k := len(his) - 1; k >= 0; k-- {
-		if h := entryHeight(his[k]); line < pos+h {
+		if h := entryHeight(his[k], collapsed); line < pos+h {
 			return k
 		}
-		pos += entryHeight(his[k])
+		pos += entryHeight(his[k], collapsed)
 	}
 	return 0
 }
 
 // adjustScroll moves scroll as little as possible so entry sel is fully
 // visible. A block taller than the viewport is aligned to the top instead.
-func adjustScroll(his []block, sel, scroll, v int) int {
+func adjustScroll(his []block, sel, scroll, v int, collapsed bool) int {
 	if len(his) == 0 {
 		return 0
 	}
@@ -464,8 +481,8 @@ func adjustScroll(his []block, sel, scroll, v int) int {
 	if sel >= len(his) {
 		sel = len(his) - 1
 	}
-	t := topLine(his, sel)
-	h := entryHeight(his[sel])
+	t := topLine(his, sel, collapsed)
+	h := entryHeight(his[sel], collapsed)
 	if h > v {
 		scroll = t
 	} else {
@@ -480,7 +497,7 @@ func adjustScroll(his []block, sel, scroll, v int) int {
 			scroll = t
 		}
 	}
-	max := totalLines(his) - v
+	max := totalLines(his, collapsed) - v
 	if max < 0 {
 		max = 0
 	}
@@ -490,6 +507,23 @@ func adjustScroll(his []block, sel, scroll, v int) int {
 		scroll = max
 	}
 	return scroll
+}
+
+// moreText is the truncation indicator shown for a collapsed tall block.
+func moreText(n int) string {
+	return "⋯ " + itoa(n) + " more lines"
+}
+
+// cropText truncates s to width display columns.
+func cropText(s string, width int) string {
+	if width < 1 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) > width {
+		r = r[:width]
+	}
+	return string(r)
 }
 
 // overlayStatus renders the bottom status row. In search mode it shows the
@@ -508,7 +542,7 @@ func overlayStatus(ov *overlay, total, width int) string {
 		if ov.filter != "" {
 			text += "  /" + ov.filter
 		}
-		text += "   ⏎/y copy   j/k move   ^u/^d page   esc cancel"
+		text += "   ⏎/y copy   j/k move   ^u/^d page   / filter   c collapse/expand   esc cancel"
 	}
 	return reverseLine(text, width)
 }

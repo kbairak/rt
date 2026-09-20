@@ -66,6 +66,7 @@ type session struct {
 	searchActive bool
 	query        string
 	searchPend   []byte
+	collapsed    bool // collapse blocks to their first collapsedLines rows
 	copyPend     []byte
 	copyPending  bool
 	copySel      int
@@ -214,6 +215,7 @@ func (s *session) routeStdin(data []byte) {
 		s.searchActive = false
 		s.query = ""
 		s.searchPend = nil
+		s.collapsed = false
 		s.sel = len(s.history) - 1
 		s.scroll = 0
 		s.copyPend = nil
@@ -429,6 +431,7 @@ func (s *session) paint() {
 			searching: s.searchActive,
 			query:     s.query,
 			filter:    s.filter,
+			collapsed: s.collapsed,
 		}
 	}
 	s.mu.Unlock()

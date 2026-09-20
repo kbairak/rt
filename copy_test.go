@@ -251,19 +251,19 @@ func TestAdjustScrollRevealsMinimally(t *testing.T) {
 
 	// Newest fully visible from scroll 2? It occupies lines 0..1, so scroll=2
 	// hides it; reveal minimally -> 0.
-	if got := adjustScroll(his, 2, 2, v); got != 0 {
+	if got := adjustScroll(his, 2, 2, v, false); got != 0 {
 		t.Fatalf("select newest: scroll=%d want 0", got)
 	}
 	// Middle occupies 2..3; from scroll 0 reveal bottom -> 1.
-	if got := adjustScroll(his, 1, 0, v); got != 1 {
+	if got := adjustScroll(his, 1, 0, v, false); got != 1 {
 		t.Fatalf("select middle: scroll=%d want 1", got)
 	}
 	// Middle already fully visible at scroll 1 -> unchanged.
-	if got := adjustScroll(his, 1, 1, v); got != 1 {
+	if got := adjustScroll(his, 1, 1, v, false); got != 1 {
 		t.Fatalf("middle visible: scroll=%d want 1", got)
 	}
 	// Oldest occupies 4..5; clamp at max=total-v=3.
-	if got := adjustScroll(his, 0, 0, v); got != 3 {
+	if got := adjustScroll(his, 0, 0, v, false); got != 3 {
 		t.Fatalf("select oldest: scroll=%d want 3", got)
 	}
 }
@@ -272,7 +272,7 @@ func TestAdjustScrollAlignsTallBlockToTop(t *testing.T) {
 	tall := mkRows("abcde", 4)            // 5 rows + separator = 6 lines, viewport 3
 	his := []block{tall, mkBlock('Z', 4)} // Z newest (2 lines), tall oldest
 	// tall top line = 2. h=6 > v=3 -> align top.
-	if got := adjustScroll(his, 0, 0, 3); got != 2 {
+	if got := adjustScroll(his, 0, 0, 3, false); got != 2 {
 		t.Fatalf("tall block: scroll=%d want 2", got)
 	}
 }
@@ -456,5 +456,71 @@ func TestOverlayStatusSearch(t *testing.T) {
 	st = overlayStatus(&overlay{sel: 0, filter: "foo"}, 3, 80)
 	if !strings.Contains(st, "COPY 3/3") || !strings.Contains(st, "/foo") {
 		t.Fatalf("filter status: %q", st)
+	}
+}
+
+func TestEntryHeightCollapsed(t *testing.T) {
+	b := mkRows("abcdefghij", 8) // 10 content rows
+	if got := entryHeight(b, false); got != 11 {
+		t.Fatalf("expanded height=%d want 11", got)
+	}
+	if got := entryHeight(b, true); got != 9 { // sep + 7 rows + indicator
+		t.Fatalf("collapsed height=%d want 9", got)
+	}
+	short := mkRows("abc", 8)
+	if entryHeight(short, true) != entryHeight(short, false) {
+		t.Fatal("short block must be unchanged by collapse")
+	}
+}
+
+func TestToggleCollapse(t *testing.T) {
+	his := []block{mkRows("abcdefghij", 8)}
+	s := &session{history: his, view: his, copyActive: true, sel: 0, height: 12}
+
+	s.handleCopyInput([]byte("c"))
+	if !s.collapsed {
+		t.Fatal("c must collapse")
+	}
+	s.handleCopyInput([]byte("c"))
+	if s.collapsed {
+		t.Fatal("c must expand")
+	}
+}
+
+func TestCollapseKeyIsLiteralInSearch(t *testing.T) {
+	his := []block{mkRows("abc", 8)}
+	s := &session{history: his, view: his, copyActive: true, searchActive: true, height: 12}
+
+	s.handleSearchInput([]byte("c"))
+	if s.collapsed || s.query != "c" {
+		t.Fatalf("search: collapsed=%v query=%q", s.collapsed, s.query)
+	}
+}
+
+func TestComposeCollapsedShowsIndicator(t *testing.T) {
+	his := []block{mkRows("abcdefghij", 8)}
+
+	rows, _, _ := compose(his, vtWith(t, 20, 12, ""), 20, 12, &overlay{sel: 0, collapsed: true})
+	all := ""
+	for _, r := range rows {
+		all += string(r) + "\n"
+	}
+	if !strings.Contains(string(rows[8]), "3 more lines") {
+		t.Fatalf("row 8 must be the indicator: %q", rows[8])
+	}
+	if strings.Contains(all, "h") {
+		t.Fatal("rows past the cap must not be drawn")
+	}
+
+	rows, _, _ = compose(his, vtWith(t, 20, 12, ""), 20, 12, &overlay{sel: 0})
+	if !strings.Contains(string(rows[10]), "j") || strings.Contains(string(rows[10]), "more") {
+		t.Fatalf("expanded last row: %q", rows[10])
+	}
+}
+
+func TestFilterMatchesHiddenLines(t *testing.T) {
+	his := []block{mkRows("abcdefghij", 8)}
+	if got := filterHistory(his, "j"); len(got) != 1 {
+		t.Fatalf("filter on collapsed-away line must match: %d", len(got))
 	}
 }
