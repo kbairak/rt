@@ -132,18 +132,18 @@ func (s *session) handleCopyInput(data []byte) {
 	for _, a := range acts {
 		switch a {
 		case ovOlder:
-			s.sel = s.repAt(s.olderThan(s.sel))
+			if s.sel > 0 {
+				s.sel--
+			}
 		case ovNewer:
 			if s.sel < len(s.history)-1 {
-				s.sel = s.repAt(s.sel + 1)
+				s.sel++
 			}
 		case ovOldest:
-			if len(s.history) > 0 {
-				s.sel = s.repAt(0)
-			}
+			s.sel = 0
 		case ovNewest:
 			if len(s.history) > 0 {
-				s.sel = s.repAt(len(s.history) - 1)
+				s.sel = len(s.history) - 1
 			}
 		case ovCopy:
 			s.copyPending = true
@@ -165,31 +165,6 @@ func (s *session) closeOverlay() {
 	s.copyPend = nil
 	s.dirty = true
 	s.wake()
-}
-
-// repAt returns the newest index of the duplicate run containing i, i.e. the
-// block the renderer actually draws for that run.
-func (s *session) repAt(i int) int {
-	if i < 0 || i >= len(s.history) {
-		return i
-	}
-	for i+1 < len(s.history) && blocksEqual(s.history[i], s.history[i+1]) {
-		i++
-	}
-	return i
-}
-
-// olderThan returns the index of the nearest older block that starts a distinct
-// run, so a collapsed duplicate run is crossed in one step.
-func (s *session) olderThan(i int) int {
-	if i <= 0 || len(s.history) == 0 {
-		return 0
-	}
-	j := i - 1
-	for j > 0 && blocksEqual(s.history[j], s.history[i]) {
-		j--
-	}
-	return j
 }
 
 // overlayStatus renders the bottom status row for copy mode: the selected block

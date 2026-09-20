@@ -95,16 +95,16 @@ func TestDecodeOverlaySplitSequence(t *testing.T) {
 	}
 }
 
-func TestCopyNavigationSkipsDuplicateRuns(t *testing.T) {
-	// history oldest -> newest: A B B C
-	h := []block{mkBlock('A', 4), mkBlock('B', 4), mkBlock('B', 4), mkBlock('C', 4)}
+func TestCopyNavigation(t *testing.T) {
+	// history is already collapsed at append time: A B C (oldest -> newest).
+	h := []block{mkBlock('A', 4), mkBlock('B', 4), mkBlock('C', 4)}
 	s := &session{history: h, copyActive: true, sel: len(h) - 1}
 
-	s.handleCopyInput([]byte("j")) // C -> B (representative index 2)
-	if s.sel != 2 {
-		t.Fatalf("j: sel=%d want 2", s.sel)
+	s.handleCopyInput([]byte("j")) // C -> B
+	if s.sel != 1 {
+		t.Fatalf("j: sel=%d want 1", s.sel)
 	}
-	s.handleCopyInput([]byte("j")) // B run -> A
+	s.handleCopyInput([]byte("j")) // B -> A
 	if s.sel != 0 {
 		t.Fatalf("j: sel=%d want 0", s.sel)
 	}
@@ -112,17 +112,42 @@ func TestCopyNavigationSkipsDuplicateRuns(t *testing.T) {
 	if s.sel != 0 {
 		t.Fatalf("j at oldest: sel=%d want 0", s.sel)
 	}
-	s.handleCopyInput([]byte("k")) // A -> B (representative index 2)
-	if s.sel != 2 {
-		t.Fatalf("k: sel=%d want 2", s.sel)
+	s.handleCopyInput([]byte("k")) // A -> B
+	if s.sel != 1 {
+		t.Fatalf("k: sel=%d want 1", s.sel)
 	}
 	s.handleCopyInput([]byte("G")) // oldest
 	if s.sel != 0 {
 		t.Fatalf("G: sel=%d want 0", s.sel)
 	}
 	s.handleCopyInput([]byte("g")) // newest
-	if s.sel != 3 {
-		t.Fatalf("g: sel=%d want 3", s.sel)
+	if s.sel != 2 {
+		t.Fatalf("g: sel=%d want 2", s.sel)
+	}
+}
+
+func TestAppendBlockCollapsesIdentical(t *testing.T) {
+	s := &session{}
+	if !s.appendBlock(mkBlock('A', 4)) {
+		t.Fatal("first append must create an entry")
+	}
+	if s.appendBlock(mkBlock('A', 4)) {
+		t.Fatal("identical append must collapse")
+	}
+	if s.appendBlock(mkBlock('A', 4)) {
+		t.Fatal("identical append must collapse")
+	}
+	if !s.appendBlock(mkBlock('B', 4)) {
+		t.Fatal("different append must create an entry")
+	}
+	if len(s.history) != 2 {
+		t.Fatalf("entries=%d want 2", len(s.history))
+	}
+	if s.history[0].count != 3 {
+		t.Fatalf("collapsed count=%d want 3", s.history[0].count)
+	}
+	if s.history[1].count != 1 {
+		t.Fatalf("new entry count=%d want 1", s.history[1].count)
 	}
 }
 

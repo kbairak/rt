@@ -96,7 +96,7 @@ var (
 // Every history append MUST go through here so blocksEqual's hash fast path
 // works; a hand-built literal leaves hash zero and fast-rejects everything.
 func newBlock(g [][]vt10x.Glyph, width, code int) block {
-	return block{cells: g, width: width, code: code, hash: blockHash(g)}
+	return block{cells: g, width: width, code: code, count: 1, hash: blockHash(g)}
 }
 
 // blockHash folds the grid (dims + every glyph's Char/FG/BG/Mode) into a
@@ -217,11 +217,10 @@ func compose(his []block, vt vt10x.Terminal, width, height int, ov *overlay) ([]
 
 	for k := len(his) - 1; k >= 0 && y < limit; k-- {
 		b := his[k]
-		rep := 1
-		for j := k - 1; j >= 0 && blocksEqual(b, his[j]); j-- {
-			rep++
+		rep := b.count
+		if rep < 1 {
+			rep = 1
 		}
-		k -= rep - 1 // skip the older, now-collapsed duplicates
 		gutter := ""
 		if ov != nil {
 			gutter = " "

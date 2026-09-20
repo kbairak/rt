@@ -156,6 +156,7 @@ Notes:
 - [x] If consecutive blocks in the history are identical, modify the horizontal separator from `----...` to `- 3x ----...` above the history block and print it once
   - [x] "identical" = same chars + FG/BG + mode for every glyph; color-only diffs (`git status` clean vs dirty) must NOT collapse
   - [x] On collapse, keep the most-recent block, prefix separator with the count
+  - [x] Collapse is applied at append time (`block.count`): the grid is stored once, not rescanned per frame
 - [x] Make CTRL-l clear the screen in rt (drop history, keep prompt)
   - [x] Only intercept at prompt-idle: pty buffer empty AND past separator AND child not in alt-screen (track `inAltScreen` flag)
   - [x] When swallowed: clear `rt.his`, repaint, do NOT forward to child

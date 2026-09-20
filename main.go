@@ -22,11 +22,14 @@ const frameInterval = time.Second / 30
 // the copy path may emit an OSC 52 clipboard sequence.
 var outMu sync.Mutex
 
-// block is a finished command frozen as a cell grid.
+// block is a finished command frozen as a cell grid. count is the number of
+// consecutive identical commands this entry represents; they are collapsed at
+// append time to save memory.
 type block struct {
 	cells [][]vt10x.Glyph
 	width int
 	code  int
+	count int
 	hash  uint64
 }
 
@@ -363,8 +366,9 @@ func (s *session) freezeCommand(code int) {
 	if !s.first {
 		if g, _, _ := snapshotGrid(s.vt); g != nil {
 			b := newBlock(g, s.width, code)
-			s.history = append(s.history, b)
-			s.log.block(len(s.history), blockText(b.cells))
+			if s.appendBlock(b) {
+				s.log.block(len(s.history), blockText(b.cells))
+			}
 		}
 	} else {
 		s.first = false
@@ -377,12 +381,25 @@ func (s *session) freezeCommand(code int) {
 func (s *session) freezeFinal() {
 	if g, _, _ := snapshotGrid(s.vt); g != nil {
 		b := newBlock(g, s.width, s.finalCode)
-		s.history = append(s.history, b)
-		s.log.event("block " + itoa(len(s.history)) + " (final)")
-		s.log.block(len(s.history), blockText(b.cells))
+		if s.appendBlock(b) {
+			s.log.event("block " + itoa(len(s.history)) + " (final)")
+			s.log.block(len(s.history), blockText(b.cells))
+		}
 		s.dirty = true
 	}
 	s.vt = vt10x.New(vt10x.WithSize(s.width, s.height))
+}
+
+// appendBlock adds b to history, collapsing it into the newest entry when the
+// grids are identical (incrementing that entry's count) instead of storing a
+// duplicate. It reports whether a new entry was created. Caller holds s.mu.
+func (s *session) appendBlock(b block) bool {
+	if n := len(s.history); n > 0 && blocksEqual(s.history[n-1], b) {
+		s.history[n-1].count++
+		return false
+	}
+	s.history = append(s.history, b)
+	return true
 }
 
 // paint writes the minimal frame that brings the terminal up to date.
