@@ -262,27 +262,50 @@ func TestTrackAltScreen(t *testing.T) {
 	}
 }
 
-func TestSwallowCtrlL(t *testing.T) {
+func TestIndexFrom(t *testing.T) {
+	data := []byte("abXabX")
 	cases := []struct {
-		name    string
-		data    string
-		buffer  []byte
-		first   bool
-		inAlt   bool
-		swallow bool
+		name  string
+		sep   string
+		start int
+		want  int
 	}{
-		{"idle pure ctrl-l", "\x0c", nil, false, false, true},
-		{"double ctrl-l", "\x0c\x0c", nil, false, false, true},
-		{"bootstrap prompt", "\x0c", nil, true, false, false},
-		{"buffer non-empty", "\x0c", []byte("x"), false, false, false},
-		{"in alt-screen", "\x0c", nil, false, true, false},
-		{"pasted mixed", "\x0cA", nil, false, false, false},
-		{"empty read", "", nil, false, false, false},
+		{"from zero", "ab", 0, 0},
+		{"skip first", "ab", 1, 3},
+		{"past last", "ab", 4, -1},
+		{"exact tail", "X", 5, 5},
+		{"start past end", "ab", 6, -1},
+		{"start beyond end", "ab", 99, -1},
+		{"negative start clamps", "ab", -3, 0},
+		{"missing", "zz", 0, -1},
+		{"empty sep", "", 2, 2},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := swallowCtrlL([]byte(c.data), c.buffer, c.first, c.inAlt); got != c.swallow {
-				t.Fatalf("swallowCtrlL = %v, want %v", got, c.swallow)
+			if got := indexFrom(data, []byte(c.sep), c.start); got != c.want {
+				t.Fatalf("indexFrom(%q, %q, %d) = %d, want %d", data, c.sep, c.start, got, c.want)
+			}
+		})
+	}
+}
+
+func TestOnlyHasCtrlLs(t *testing.T) {
+	cases := []struct {
+		name string
+		data string
+		want bool
+	}{
+		{"single ctrl-l", "\x0c", true},
+		{"double ctrl-l", "\x0c\x0c", true},
+		{"pasted mixed", "\x0cA", false},
+		{"leading mixed", "A\x0c", false},
+		{"empty read", "", false},
+		{"plain text", "ls\n", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := onlyHasCtrlLs([]byte(c.data)); got != c.want {
+				t.Fatalf("onlyHasCtrlLs(%q) = %v, want %v", c.data, got, c.want)
 			}
 		})
 	}

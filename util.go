@@ -1,5 +1,38 @@
 package main
 
+import "bytes"
+
+// indexFrom returns the index of sep in data at or after start, or -1. Like
+// bytes.Index with a Python-style start offset, but the returned index is
+// absolute. start is clamped to [0, len(data)].
+func indexFrom(data, sep []byte, start int) int {
+	if start < 0 {
+		start = 0
+	}
+	if start > len(data) {
+		return -1
+	}
+	i := bytes.Index(data[start:], sep)
+	if i < 0 {
+		return -1
+	}
+	return i + start
+}
+
+// onlyHasCtrlLs reports whether data is a non-empty run of CTRL-L bytes
+// (^\x0c+$). Empty and mixed reads are false.
+func onlyHasCtrlLs(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	for _, b := range data {
+		if b != 0x0c {
+			return false
+		}
+	}
+	return true
+}
+
 // parseInt parses a non-negative decimal integer; ok is false on an empty
 // string or any non-digit byte.
 func parseInt(s string) (int, bool) {

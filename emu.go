@@ -65,11 +65,10 @@ func composeChunk(vtp *vt10x.Terminal, data []byte, boundary func(code int)) []b
 func trackAltScreen(data []byte, inAlt *bool) {
 	from := 0
 	for {
-		j := bytes.Index(data[from:], []byte(ansiAltPrefix))
+		j := indexFrom(data, []byte(ansiAltPrefix), from)
 		if j < 0 {
 			return
 		}
-		j += from
 		k := j + len(ansiAltPrefix)
 		if k >= len(data) {
 			return
@@ -82,22 +81,6 @@ func trackAltScreen(data []byte, inAlt *bool) {
 		}
 		from = k + 1
 	}
-}
-
-// swallowCtrlL reports whether a pure CTRL-l read at the idle rt prompt should
-// be intercepted: history is cleared instead of forwarding the byte to the
-// shell. Never fires on pastes or mixed reads, mid-command output, the
-// bootstrap prompt, or fullscreen apps.
-func swallowCtrlL(data, buffer []byte, first, inAltScreen bool) bool {
-	if len(data) == 0 {
-		return false
-	}
-	for _, b := range data {
-		if b != 0x0c {
-			return false
-		}
-	}
-	return len(buffer) == 0 && !first && !inAltScreen
 }
 
 // boundary runs when a prompt marker arrives: the just-finished command's grid
