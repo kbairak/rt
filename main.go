@@ -56,14 +56,20 @@ type session struct {
 	height    int    // current terminal height, updated on SIGWINCH
 
 	// Copy overlay. While copyActive, stdin is consumed by the overlay and pty
-	// output stays in buffer; compose skips draining it. sel indexes history
-	// (representative block of a collapsed run).
-	copyActive  bool
-	sel         int
-	scroll      int
-	copyPend    []byte
-	copyPending bool
-	copySel     int
+	// output stays in buffer; compose skips draining it. sel/scroll index view,
+	// the filtered entry list (view == history when no filter is applied).
+	copyActive   bool
+	sel          int
+	scroll       int
+	view         []block // filtered entries copy-mode renders/navigates
+	filter       string  // applied search query (empty = none)
+	searchActive bool
+	query        string
+	searchPend   []byte
+	copyPend     []byte
+	copyPending  bool
+	copySel      int
+	copyText     string
 
 	vt      vt10x.Terminal
 	history []block
@@ -203,6 +209,11 @@ func (s *session) routeStdin(data []byte) {
 	if onlyHasCopyKeys(data) &&
 		len(s.buffer) == 0 && !s.first && !s.alt && len(s.history) > 0 {
 		s.copyActive = true
+		s.view = s.history
+		s.filter = ""
+		s.searchActive = false
+		s.query = ""
+		s.searchPend = nil
 		s.sel = len(s.history) - 1
 		s.scroll = 0
 		s.copyPend = nil
@@ -411,7 +422,14 @@ func (s *session) paint() {
 	w, h := s.width, s.height
 	var ov *overlay
 	if s.copyActive {
-		ov = &overlay{sel: s.sel, scroll: s.scroll}
+		his = s.view
+		ov = &overlay{
+			sel:       s.sel,
+			scroll:    s.scroll,
+			searching: s.searchActive,
+			query:     s.query,
+			filter:    s.filter,
+		}
 	}
 	s.mu.Unlock()
 
@@ -429,12 +447,9 @@ func (s *session) flushCopy() {
 		s.mu.Unlock()
 		return
 	}
-	i := s.copySel
 	s.copyPending = false
-	var text string
-	if i >= 0 && i < len(s.history) {
-		text = blockText(s.history[i].cells)
-	}
+	text := s.copyText
+	s.copyText = ""
 	s.mu.Unlock()
 	setClipboard(text)
 }

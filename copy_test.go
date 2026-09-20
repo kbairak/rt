@@ -43,6 +43,8 @@ func TestDecodeOverlayKeys(t *testing.T) {
 		{"\x0e", []overlayAction{ovOlder}},
 		{"\x10", []overlayAction{ovNewer}},
 		{"\x1e", []overlayAction{ovCancel}},
+		{"\x04", []overlayAction{ovPageDown}},
+		{"\x15", []overlayAction{ovPageUp}},
 		{"z", nil},
 		{"?", nil},
 		{"h", nil},
@@ -98,7 +100,7 @@ func TestDecodeOverlaySplitSequence(t *testing.T) {
 func TestCopyNavigation(t *testing.T) {
 	// history is already collapsed at append time: A B C (oldest -> newest).
 	h := []block{mkBlock('A', 4), mkBlock('B', 4), mkBlock('C', 4)}
-	s := &session{history: h, copyActive: true, sel: len(h) - 1, height: 10}
+	s := &session{history: h, view: h, copyActive: true, sel: len(h) - 1, height: 10}
 
 	s.handleCopyInput([]byte("j")) // C -> B
 	if s.sel != 1 {
@@ -152,7 +154,7 @@ func TestAppendBlockCollapsesIdentical(t *testing.T) {
 }
 
 func TestCopyExitActions(t *testing.T) {
-	s := &session{history: []block{mkBlock('A', 4)}, copyActive: true, sel: 0}
+	s := &session{history: []block{mkBlock('A', 4)}, view: []block{mkBlock('A', 4)}, copyActive: true, sel: 0}
 
 	s.handleCopyInput([]byte("y"))
 	if s.copyActive || !s.copyPending || s.copySel != 0 {
@@ -292,5 +294,167 @@ func TestComposeScrollCropsTop(t *testing.T) {
 	}
 	if !strings.Contains(string(rows[2]), "p") {
 		t.Fatalf("row 2 must be A's first row: %q", rows[2])
+	}
+}
+
+func TestPageReanchorsSelection(t *testing.T) {
+	// Four 2-line entries; top lines D=0 C=2 B=4 A=6; total=8. V=4, step=2.
+	his := []block{mkBlock('A', 4), mkBlock('B', 4), mkBlock('C', 4), mkBlock('D', 4)}
+	s := &session{history: his, view: his, copyActive: true, sel: 3, scroll: 0, height: 5}
+
+	s.handleCopyInput([]byte{0x04}) // page down -> C at window top
+	if s.scroll != 2 || s.sel != 2 {
+		t.Fatalf("page down: scroll=%d sel=%d want 2,2", s.scroll, s.sel)
+	}
+	s.handleCopyInput([]byte{0x04}) // -> B
+	if s.scroll != 4 || s.sel != 1 {
+		t.Fatalf("page down: scroll=%d sel=%d want 4,1", s.scroll, s.sel)
+	}
+	s.handleCopyInput([]byte{0x04}) // clamped at max=4, B still fully visible
+	if s.scroll != 4 || s.sel != 1 {
+		t.Fatalf("page down clamp: scroll=%d sel=%d want 4,1", s.scroll, s.sel)
+	}
+	s.handleCopyInput([]byte{0x15}) // up to 2; B still fully visible -> keep
+	if s.scroll != 2 || s.sel != 1 {
+		t.Fatalf("page up visible: scroll=%d sel=%d want 2,1", s.scroll, s.sel)
+	}
+	s.handleCopyInput([]byte{0x15}) // up to 0; B out -> top block D
+	if s.scroll != 0 || s.sel != 3 {
+		t.Fatalf("page up: scroll=%d sel=%d want 0,3", s.scroll, s.sel)
+	}
+}
+
+func TestPageSelectsBlockFillingWindow(t *testing.T) {
+	// tall: 6 rows (7 lines); Z: 2 lines. top lines Z=0, tall=2; total=9.
+	tall := mkRows("abcde", 4)
+	his := []block{tall, mkBlock('Z', 4)}
+	s := &session{history: his, view: his, copyActive: true, sel: 1, scroll: 1, height: 5}
+
+	s.handleCopyInput([]byte{0x04}) // scroll=3, window inside tall, no block start
+	if s.scroll != 3 || s.sel != 0 {
+		t.Fatalf("fill window: scroll=%d sel=%d want 3,0", s.scroll, s.sel)
+	}
+}
+
+func searchKinds(evs []searchEvent) []searchEventKind {
+	out := make([]searchEventKind, len(evs))
+	for i, e := range evs {
+		out[i] = e.kind
+	}
+	return out
+}
+
+func kindsEqual(a, b []searchEventKind) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestDecodeSearch(t *testing.T) {
+	evs, pend := decodeSearch(nil, []byte("ab\x7f"))
+	if !kindsEqual(searchKinds(evs), []searchEventKind{seRune, seRune, seBackspace}) || len(pend) != 0 {
+		t.Fatalf("basic: evs=%v pend=%q", evs, pend)
+	}
+	if evs[0].r != 'a' || evs[1].r != 'b' {
+		t.Fatalf("runes: %v", evs)
+	}
+
+	evs, _ = decodeSearch(nil, []byte("\r"))
+	if !kindsEqual(searchKinds(evs), []searchEventKind{seApply}) {
+		t.Fatalf("enter: %v", evs)
+	}
+	evs, _ = decodeSearch(nil, []byte("\x1b"))
+	if !kindsEqual(searchKinds(evs), []searchEventKind{seCancel}) {
+		t.Fatalf("esc: %v", evs)
+	}
+
+	// Control bytes ignored; a CSI sequence is consumed, not treated as Esc.
+	evs, pend = decodeSearch(nil, []byte("\x01\x1b[A\x02"))
+	if len(evs) != 0 || len(pend) != 0 {
+		t.Fatalf("ignored: evs=%v pend=%q", evs, pend)
+	}
+
+	// Split escape sequence is held, then consumed.
+	evs, pend = decodeSearch(nil, []byte("\x1b["))
+	if len(evs) != 0 || string(pend) != "\x1b[" {
+		t.Fatalf("split head: evs=%v pend=%q", evs, pend)
+	}
+	evs, pend = decodeSearch(pend, []byte("A"))
+	if len(evs) != 0 || len(pend) != 0 {
+		t.Fatalf("split tail: evs=%v pend=%q", evs, pend)
+	}
+}
+
+// mkText builds a one-row block from a string.
+func mkText(s string, width int) block {
+	g := mkGrid(1, width)
+	for x, c := range s {
+		set(g, x, 0, c, vt10x.DefaultFG, vt10x.DefaultBG)
+	}
+	return newBlock(g, width, 0)
+}
+
+func TestFilterHistory(t *testing.T) {
+	his := []block{mkText("hello", 8), mkText("world", 8)}
+	if got := filterHistory(his, "ell"); len(got) != 1 || string(got[0].cells[0][0].Char) != "h" {
+		t.Fatalf("substring: %v", got)
+	}
+	if got := filterHistory(his, "WORLD"); len(got) != 0 {
+		t.Fatalf("case sensitive: %v", got)
+	}
+	if got := filterHistory(his, ""); len(got) != len(his) {
+		t.Fatalf("empty query must return all: %v", got)
+	}
+	if got := filterHistory(his, "nope"); len(got) != 0 {
+		t.Fatalf("no match: %v", got)
+	}
+}
+
+func TestSearchApplyAndCancel(t *testing.T) {
+	his := []block{mkText("hello", 8), mkText("world", 8)}
+	s := &session{history: his, view: his, copyActive: true, searchActive: true, sel: 1, height: 10}
+
+	s.handleSearchInput([]byte("ell"))
+	if s.query != "ell" || !s.searchActive {
+		t.Fatalf("typing: query=%q active=%v", s.query, s.searchActive)
+	}
+	s.handleSearchInput([]byte("\r"))
+	if s.searchActive || s.filter != "ell" || len(s.view) != 1 || s.sel != 0 {
+		t.Fatalf("apply: active=%v filter=%q view=%d sel=%d", s.searchActive, s.filter, len(s.view), s.sel)
+	}
+
+	// Re-enter search and cancel: filter cleared, full view restored.
+	s.searchActive = true
+	s.query = ""
+	s.handleSearchInput([]byte("\x1b"))
+	if s.searchActive || s.filter != "" || len(s.view) != len(his) || s.sel != len(his)-1 {
+		t.Fatalf("cancel: active=%v filter=%q view=%d sel=%d", s.searchActive, s.filter, len(s.view), s.sel)
+	}
+}
+
+func TestSearchNoMatchStaysInSearch(t *testing.T) {
+	his := []block{mkText("hello", 8)}
+	s := &session{history: his, view: his, copyActive: true, searchActive: true, sel: 0, height: 10}
+
+	s.handleSearchInput([]byte("zzz\r"))
+	if !s.searchActive || s.query != "zzz" || s.filter != "" {
+		t.Fatalf("no match: active=%v query=%q filter=%q", s.searchActive, s.query, s.filter)
+	}
+}
+
+func TestOverlayStatusSearch(t *testing.T) {
+	st := overlayStatus(&overlay{searching: true, query: "foo"}, 3, 80)
+	if !strings.Contains(st, "SEARCH foo") {
+		t.Fatalf("search status: %q", st)
+	}
+	st = overlayStatus(&overlay{sel: 0, filter: "foo"}, 3, 80)
+	if !strings.Contains(st, "COPY 3/3") || !strings.Contains(st, "/foo") {
+		t.Fatalf("filter status: %q", st)
 	}
 }
