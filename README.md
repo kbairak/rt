@@ -1,182 +1,161 @@
-# reverse-terminal (rt)
+<div align="center">
 
-## Goal
+# reverse-terminal (`rt`)
 
-A terminal utility that keeps the shell prompt pinned at the top of the screen.
-Each command and its output occupies its own block. As new commands run, old
-blocks are pushed downward. This reverses the traditional scrolling direction:
-new content appears at the top, history accumulates below.
+**A terminal that keeps your prompt pinned to the top and lets history grow downward.**
 
-The utility must work with any terminal emulator and respect the user's existing
-shell configuration (aliases, exports, functions, plugins, theme).
+Your eye stays where you type. Newest output stays next to the prompt. Old commands sink down the screen instead of scrolling away.
+
+</div>
 
 ---
 
-## Demonstration
+## Why
 
-The idea is that we start with a new terminal session and it looks like this:
+Every terminal in the world pins the input line to the **bottom**. On a tall or full-screen terminal that means your focus is constantly at the lower edge of the display: you look down to type, down to read the result, down again for the next command. When a command produces a lot of output, it pushes your previous work **up** and out of view — the exact content you were most likely to still need.
 
-```
-+----------------------------+
-| > (next command goes here) +
-| -------------------------- +
-|                            +
-|                            +
-|                            +
-+----------------------------+
-```
+This is an ergonomics problem before it is a feature problem. [Warp's issue #22](https://github.com/warpdotdev/warp/issues/22) describes it well: treat the input buffer more like a browser's omnibar. The URL bar sits at the top of the window; the page grows **down**. Recent context stays adjacent to where you're working, and your gaze doesn't commute to the bottom of the screen.
 
-(the "next command goes here" does not actually appear, it's for your benefit)
+`rt` takes that idea all the way: instead of a special input pane bolted onto a normal terminal, it reverses the scrolling direction itself.
 
-So, the prompt is at the top. Let's press `ls<enter>`
+- **The prompt is pinned to row 0.** It never moves.
+- **Each command and its output form one block.** When the command finishes, the block is pushed downward and a fresh prompt appears above it.
+- **History reads newest-first.** The thing you just ran is directly under the prompt; older commands accumulate below it.
+- **Content grows down, not up.** Long output fills the space beneath the prompt rather than shoving your recent work off the top.
 
-```
-+----------------------------+
-| > (next command goes here) +
-| -------------------------- +
-| > ls                       +
-| < 1.txt 2.txt ....         +
-| -------------------------- +
-|                            +
-+----------------------------+
-```
+The result feels like a stack of command "cards" with a permanent input line at the top — a shell that grows in the direction you actually read.
 
-So, `ls`, both the command and its output are on their own block. After ls has finished, it is pushed down and the next prompt is above it. Let's press `pwd<enter>`
+## Demo
+
+A fresh session:
 
 ```
-+----------------------------+
-| > (next command goes here) +
-| -------------------------- +
-| > pwd                      +
-| < /path/to/folder          +
-| -------------------------- +
-| > ls                       +
-| < 1.txt 2.txt ....         +
-| -------------------------- +
-|                            +
-+----------------------------+
++----------------------------------+
+| > (next command goes here)       |
+| -------------------------------- |
+|                                  |
+|                                  |
+|                                  |
++----------------------------------+
 ```
 
-`ls` is pushed further down. So, the prompt is always at the top and previous commands are in reverse order.
+Run `ls`:
 
-## PoC Scope
+```
++----------------------------------+
+| > (next command goes here)       |
+| -------------------------------- |
+| > ls                             |
+| < 1.txt  2.txt  3.txt            |
+| -------------------------------- |
+|                                  |
++----------------------------------+
+```
 
-The proof-of-concept delivers exactly three capabilities. Everything else is
-deferred.
+Run `pwd`:
 
-### 1. Spawn shell under PTY
+```
++----------------------------------+
+| > (next command goes here)       |
+| -------------------------------- |
+| > pwd                            |
+| < /path/to/folder                |
+| -------------------------------- |
+| > ls                             |
+| < 1.txt  2.txt  3.txt            |
+| -------------------------------- |
+|                                  |
++----------------------------------+
+```
 
-Launch a real shell (zsh) as a child process. The utility sits between the user's
-terminal and the shell, acting as a transparent proxy for stdin/stdout/stderr.
+`ls` is pushed down; `pwd` takes its place right under the prompt. Older blocks keep sinking as you work. The separator carries the block's exit code, e.g. `──── [1] ────` after a command that failed.
 
-### 2. Capture command + output as blocks
+## How it works
 
-Detect when a command starts and when it finishes. Capture:
+`rt` is a transparent proxy that sits between your terminal and a real shell. It does not implement a shell, a prompt, or completion — it just re-frames what the shell already does.
 
-- The command string (what the user typed)
-- The full stdout/stderr output
-- The exit code
+1. **Spawn a shell under a PTY.** `rt` opens a pseudo-terminal and launches your shell as a child process, then shuttles bytes in both directions. Your aliases, exports, functions, plugins, and theme all load exactly as they normally would.
+2. **Inject a marker, not a prompt.** A small hook added at shell startup prints a zero-width OSC sequence just before each prompt. `rt` watches the output stream for it. The marker is untypable, so it can never be confused with real output, and each shell gets the hook that fits it best (a `precmd` function for zsh, `PROMPT_COMMAND` for bash, `PS1` for POSIX sh, a prompt object for Python, a `post_run_cell` event for IPython).
+3. **Freeze each command into a block.** On every marker, `rt` captures the terminal emulator's cell grid — the command line, its stdout/stderr, colors and all — together with the exit code parsed from the marker. That frozen grid becomes a history entry, and the emulator resets for the next command.
+4. **Render prompt-at-top.** A renderer clears the screen and draws the live grid first, then walks history newest-to-oldest, drawing a separator and each block until the screen is full. Blocks are cropped at the bottom edge, so the layout never scrolls.
+5. **Repaint only what changed.** Each frame is diffed against the previous one; only changed rows are emitted, each update wrapped in a DEC 2026 synchronized-update sequence so capable terminals render it atomically. This keeps `vim`, `htop`, and friends smooth instead of tearing.
 
-Each command-output pair forms a single block stored in memory.
+Because `rt` emulates the terminal itself (`vt10x`), full-screen apps work: when a program switches to the alternate screen, the live grid fills the visible rows and history simply stays cropped below it. Resizing the window resizes both the PTY and the emulator.
 
-### 3. Render prompt-at-top layout
+## Supported shells
 
-Draw the terminal screen so the prompt always lives at row 0. As blocks
-accumulate, older blocks shift down. A horizontal separator is drawn between
-blocks. The rendering must handle terminal resize events gracefully.
+The shell is taken from an argument, then `$SHELL`, and can always be forced with `--mode`:
 
----
+| Mode      | Shells                 | Startup injection                                                                                 |
+| --------- | ---------------------- | ------------------------------------------------------------------------------------------------- |
+| `zsh`     | `zsh`                  | `ZDOTDIR` shim that sources your real `.zshenv`/`.zshrc`, then adds a `precmd` hook               |
+| `bash`    | `bash`                 | `--rcfile` shim that sources your real `~/.bashrc`, then prepends a `PROMPT_COMMAND` hook         |
+| `sh`      | `sh`, `dash`, `ksh`, … | `ENV` shim that sources your real `$ENV` and installs the marker in `PS1`                         |
+| `python`  | `python`, `python3`    | `PYTHONSTARTUP` shim that installs a prompt object emitting the marker                            |
+| `ipython` | `ipython`, `ipython3`  | `PYTHONSTARTUP` shim that registers a `post_run_cell` event (real `IPYTHONDIR`/profile preserved) |
 
-## Implementation outline
+Your original configuration file is always sourced first, and the hook is applied last so it wins even if your prompt is set by a plugin. The marker is emitted as zero-width in the prompt, so it never disturbs prompt width or redraws.
 
-- Variables:
-  - buffer: buffer of bytes
-  - vt: vt10x instance
-  - history: slice of blocks, blocks are stripped vt10x grids
-  - width, height: dimensions of the terminal
-- We set raw mode on the terminal
-- Create log file with timestamp in name
-- We add the PS1 stuff in a temporary rc file and load sh with the temp file as its only configuration
-- We open a pty with sh
-- event handlers/goroutines:
-  - read from main's stdin:
-    - pprint chunk into log file
-    - feed into pty
-  - read from pty:
-    - pprint chunk into log file
-    - feed chunk into buffer
-  - renderer, 30FPS:
-    - if buffer empty and size unchanged, do nothing
-    - if buffer contains separator:
-      - feed until separator into vt
-      - strip vt's grid and, if not empty, append to history
-      - reset vt
-      - chunk is now part of buffer after separator
-      - buffer is empty
-    - else if buffer ends in part of the separator:
-      - chunk is part of buffer until separator prefix
-      - buffer is separator prefix (will be read at next render)
-    - else:
-      - chunk is entire buffer
-      - buffer is empty
-    - feed chunk into vt
-    - clear screen, put cursor at 0,0
-    - strip vt's grid and print it, counting lines
-    - for block in reversed history:
-      - print separator, taking current width into account, count one line
-      - print block's grid, respecting the current width, counting lines
-      - when printed lines reach terminal's height, stop
-      - Note: stop mid-block when reach height to avoid scrolling
-    - reset cursor position to vt's cursor position
-- terminal size change:
-  - update width and height variables
-  - update pty's size
-  - update vt's dimensions
-  - (next render will adapt automatically)
+## Features
 
-Notes:
+- **Prompt pinned to the top** — never scrolls, never moves.
+- **One block per command** — command, output, and exit code captured together.
+- **Exit codes** — failures are visible at a glance in the block header.
+- **Collapse repeated commands** — consecutive identical blocks (same text and colors) collapse into one with a count, e.g. `- 3x ────`.
+- **Copy mode** — browse, filter, copy, and re-run past commands.
+- **Clear at the prompt** — `Ctrl-L` drops history and keeps the prompt (only when idle).
+- **Full-screen apps** — `vim`, `less`, `htop` and friends run in the live area; history stays tucked below.
+- **Resize-aware** — both the PTY and the emulator follow the window.
+- **Terminal-agnostic** — works in any emulator; no special support required.
+- **Optional logging** — `--log` records a timestamped trace of every byte and event for debugging.
 
-- Separator is zero-width-private-escape ensuring it's after \r\n
+### Copy mode
 
----
+Open it with **`Ctrl-^`** at an idle prompt (it never triggers while a command or full-screen app is running).
 
-## Non-goals (explicitly deferred)
+| Key                 | Action                                               |
+| ------------------- | ---------------------------------------------------- |
+| `j` / `k`, arrows   | Move selection older / newer                         |
+| `g` / `G`           | Jump to newest / oldest                              |
+| `Ctrl-D` / `Ctrl-U` | Half-page down / up                                  |
+| `Enter` / `y`       | Copy the selected block to the system clipboard      |
+| `r`                 | Re-run the selected command                          |
+| `/`                 | Filter blocks by text; `Enter` applies, `Esc` clears |
+| `Ctrl-W`            | In filter mode, delete the last word                 |
+| `c`                 | Collapse / expand blocks                             |
+| `q` / `Esc`         | Close copy mode                                      |
 
-- Scroll through block history
-- Copy/paste blocks
-- Configuration file
-- Mouse support
-- Search/filter blocks
-- Persistent history across sessions
-- Custom keybindings
-- bash support (trivial to add after PoC)
+Clipboard writes use the native tool when available (`pbcopy`, `wl-copy`, `xclip`) and fall back to OSC 52.
 
-## TODOs
+## Usage
 
-- [x] If consecutive blocks in the history are identical, modify the horizontal separator from `----...` to `- 3x ----...` above the history block and print it once
-  - [x] "identical" = same chars + FG/BG + mode for every glyph; color-only diffs (`git status` clean vs dirty) must NOT collapse
-  - [x] On collapse, keep the most-recent block, prefix separator with the count
-  - [x] Collapse is applied at append time (`block.count`): the grid is stored once, not rescanned per frame
-- [x] Make CTRL-l clear the screen in rt (drop history, keep prompt)
-  - [x] Only intercept at prompt-idle: pty buffer empty AND past separator AND child not in alt-screen (track `inAltScreen` flag)
-  - [x] When swallowed: clear `rt.his`, repaint, do NOT forward to child
-- [x] Block invoking rt from rt
-  - [x] Outer rt sets env var (e.g. `RT=1`) on the pty child next to `ENV=`; inner rt checks `os.Environ()` at startup, prints "nested rt unsupported", exits. Do NOT match on command name (aliases/full paths cloak it)
-- [x] separator logic per shell
-  - [x] Shell is `args[1] || $SHELL`
-  - [x] Try to figure out which shell it is (eg '/bin/zsh' -> 'zsh')
-  - [x] User can override with `--mode` flag
-  - [x] Interactive rc path differs: zsh -> `ZDOTDIR`, bash -> `~/.bashrc` (BASH_ENV is non-interactive only), fish -> `XDG_CONFIG_HOME`
-  - [x] Apply separator hook LAST; user rc may overwrite PS1. zsh: precmd hook preferred over PS1 injection
-  - [x] Marker must be prompt-width-safe: zsh `%{...%}`, bash `\[...\]`; bare OSC miscalculates width
-  - [x] Implement zsh first (user shell), keep sh fallback
-- [x] Record exit code per block; show in block header (eg `──── [1] ────`). MARKER: PS1 expands `$?` between `sepHead` and the BEL; `boundary()` parses it into `block.code`; final block reaps the shell's own exit status at pty EOF
-- [x] fullscreen apps: option 1 ("do nothing") works — vt sized to stdin, alt-screen emulated by vt10x, live grid fills the rows so history stays cropped below. VERIFIED: nvim, bat pager
-  - [ ] Partial-height apps (pagers) already let history peek under the live grid — accept as feature
-  - [ ] fullscreen apps with side-by-side history: intercept alt-screen (`\x1b[?1049h/l`) from pty; if set, render live grid left 70% of stdin width and a strip of recent history blocks on the right. Pane-split renderer, not a width tweak
-- [x] Deny to run 'rt' if not in "real" terminal
-- [x] Repaint perf debt: `\x1b[2J` + full redraw every tick; nvim/htop-class apps tear and burn CPU. Compute cell diff between frames, emit changed rows only
-  - [x] Drop `2J`; renderer keeps previous frame, emits only changed rows, erases stale rows with `\x1b[K`, full-clears only on first frame or resize
-  - [x] Wrap each update in DEC 2026 synchronized update so capable terminals render atomically (others ignore)
-- [x] History scroll from prompt: PgUp/PgDn (or C-b/C-f) at idle prompt pans the block list. Gate on `inAltScreen`
-- [ ] Terminal query caps (document, don't fix yet): vt10x ignores DA1/`\x1b[c`, OSC 10/11 dynamic colors, cursor-shape demand; apps fall back to 256-color
+```sh
+go build -o rt .
+./rt                 # launch $SHELL
+./rt bash            # launch a specific shell
+./rt --mode ipython ipython
+./rt --log zsh       # write rt-<timestamp>.log
+```
+
+`rt` refuses to run inside itself; nesting is unsupported.
+
+## Roadmap
+
+- Scroll history from the idle prompt with `PgUp`/`PgDn`.
+- Side-by-side history beside full-screen apps instead of cropping below them.
+- Configurable keybindings and a config file.
+
+## Non-goals
+
+- Replacing the shell, prompt, or line editor.
+- Persistent history across sessions.
+
+## Development
+
+```sh
+make build   # go build -o rt .
+make test    # go test ./...
+make fmt     # gofumpt + goimports
+make lint    # go vet + staticcheck
+make check   # format check, build, test, lint
+```
