@@ -43,9 +43,10 @@ func TestDecodeOverlayKeys(t *testing.T) {
 		{"\x0e", []overlayAction{ovOlder}},
 		{"\x10", []overlayAction{ovNewer}},
 		{"\x1e", []overlayAction{ovCancel}},
-		{"\x04", []overlayAction{ovPageDown}},
-		{"\x15", []overlayAction{ovPageUp}},
+		{"d", []overlayAction{ovPageDown}},
+		{"u", []overlayAction{ovPageUp}},
 		{"z", nil},
+		{"x", []overlayAction{ovDelete}},
 		{"?", nil},
 		{"h", nil},
 		{"jk", []overlayAction{ovOlder, ovNewer}},
@@ -302,23 +303,23 @@ func TestPageReanchorsSelection(t *testing.T) {
 	his := []block{mkBlock('A', 4), mkBlock('B', 4), mkBlock('C', 4), mkBlock('D', 4)}
 	s := &session{history: his, view: his, copyActive: true, sel: 3, scroll: 0, height: 5}
 
-	s.handleCopyInput([]byte{0x04}) // page down -> C at window top
+	s.handleCopyInput([]byte{'d'}) // page down -> C at window top
 	if s.scroll != 2 || s.sel != 2 {
 		t.Fatalf("page down: scroll=%d sel=%d want 2,2", s.scroll, s.sel)
 	}
-	s.handleCopyInput([]byte{0x04}) // -> B
+	s.handleCopyInput([]byte{'d'}) // -> B
 	if s.scroll != 4 || s.sel != 1 {
 		t.Fatalf("page down: scroll=%d sel=%d want 4,1", s.scroll, s.sel)
 	}
-	s.handleCopyInput([]byte{0x04}) // clamped at max=4, B still fully visible
+	s.handleCopyInput([]byte{'d'}) // clamped at max=4, B still fully visible
 	if s.scroll != 4 || s.sel != 1 {
 		t.Fatalf("page down clamp: scroll=%d sel=%d want 4,1", s.scroll, s.sel)
 	}
-	s.handleCopyInput([]byte{0x15}) // up to 2; B still fully visible -> keep
+	s.handleCopyInput([]byte{'u'}) // up to 2; B still fully visible -> keep
 	if s.scroll != 2 || s.sel != 1 {
 		t.Fatalf("page up visible: scroll=%d sel=%d want 2,1", s.scroll, s.sel)
 	}
-	s.handleCopyInput([]byte{0x15}) // up to 0; B out -> top block D
+	s.handleCopyInput([]byte{'u'}) // up to 0; B out -> top block D
 	if s.scroll != 0 || s.sel != 3 {
 		t.Fatalf("page up: scroll=%d sel=%d want 0,3", s.scroll, s.sel)
 	}
@@ -330,9 +331,48 @@ func TestPageSelectsBlockFillingWindow(t *testing.T) {
 	his := []block{tall, mkBlock('Z', 4)}
 	s := &session{history: his, view: his, copyActive: true, sel: 1, scroll: 1, height: 5}
 
-	s.handleCopyInput([]byte{0x04}) // scroll=3, window inside tall, no block start
+	s.handleCopyInput([]byte{'d'}) // scroll=3, window inside tall, no block start
 	if s.scroll != 3 || s.sel != 0 {
 		t.Fatalf("fill window: scroll=%d sel=%d want 3,0", s.scroll, s.sel)
+	}
+}
+
+func TestDeleteSelectedBlock(t *testing.T) {
+	his := []block{mkBlock('A', 4), mkBlock('B', 4), mkBlock('C', 4)}
+	s := &session{history: his, view: his, copyActive: true, sel: 1, height: 5}
+
+	s.handleCopyInput([]byte{'x'})
+	if len(s.history) != 2 || s.history[0].hash != his[0].hash || s.history[1].hash != his[2].hash {
+		t.Fatalf("history after delete: %v", s.history)
+	}
+	if s.sel != 1 || len(s.view) != 2 {
+		t.Fatalf("sel=%d view=%d want 1,2", s.sel, len(s.view))
+	}
+
+	s.sel = 1
+	s.handleCopyInput([]byte{'x'})
+	if len(s.history) != 1 || s.sel != 0 {
+		t.Fatalf("second delete: history=%d sel=%d want 1,0", len(s.history), s.sel)
+	}
+
+	s.handleCopyInput([]byte{'x'})
+	if len(s.history) != 0 || s.sel != 0 || s.scroll != 0 {
+		t.Fatalf("empty delete: history=%d sel=%d scroll=%d", len(s.history), s.sel, s.scroll)
+	}
+}
+
+func TestDeleteUnderFilter(t *testing.T) {
+	his := []block{mkBlock('A', 4), mkBlock('B', 4)}
+	s := &session{
+		history: his, view: filterHistory(his, "B"), filter: "B",
+		copyActive: true, sel: 0, height: 5,
+	}
+	s.handleCopyInput([]byte{'x'})
+	if len(s.history) != 1 || s.history[0].hash != his[0].hash {
+		t.Fatalf("history after filtered delete: %v", s.history)
+	}
+	if len(s.view) != 0 || s.sel != 0 {
+		t.Fatalf("view=%d sel=%d want 0,0", len(s.view), s.sel)
 	}
 }
 

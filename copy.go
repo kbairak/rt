@@ -47,6 +47,7 @@ const (
 	ovToggleCollapse
 	ovReplay
 	ovCopy
+	ovDelete
 	ovCancel
 )
 
@@ -128,14 +129,16 @@ func decodeOverlay(pend, data []byte) (acts []overlayAction, pending []byte) {
 			acts = append(acts, ovNewest)
 		case 'G':
 			acts = append(acts, ovOldest)
-		case 0x04:
+		case 'd':
 			acts = append(acts, ovPageDown)
-		case 0x15:
+		case 'u':
 			acts = append(acts, ovPageUp)
 		case '/':
 			acts = append(acts, ovSearch)
 		case 'c':
 			acts = append(acts, ovToggleCollapse)
+		case 'x':
+			acts = append(acts, ovDelete)
 		case 'r':
 			acts = append(acts, ovReplay)
 		case '\r', '\n', 'y':
@@ -218,6 +221,8 @@ func (s *session) handleCopyInput(data []byte) {
 			}
 			s.closeOverlay()
 			return
+		case ovDelete:
+			s.deleteSelected()
 		case ovCancel:
 			s.closeOverlay()
 			return
@@ -260,6 +265,31 @@ func (s *session) page(delta int) {
 		return
 	}
 	s.sel = blockAtLine(s.view, ns, s.collapsed)
+}
+
+// deleteSelected removes the selected block from history and rebuilds the
+// filtered view, then clamps the selection and scroll. Caller holds mu.
+func (s *session) deleteSelected() {
+	if s.sel < 0 || s.sel >= len(s.view) {
+		return
+	}
+	h := s.view[s.sel].hash
+	for i := range s.history {
+		if s.history[i].hash == h {
+			s.history = append(s.history[:i], s.history[i+1:]...)
+			break
+		}
+	}
+	s.view = filterHistory(s.history, s.filter)
+	if len(s.view) == 0 {
+		s.sel = 0
+		s.scroll = 0
+		return
+	}
+	if s.sel >= len(s.view) {
+		s.sel = len(s.view) - 1
+	}
+	s.scroll = adjustScroll(s.view, s.sel, s.scroll, viewHeight(s.height), s.collapsed)
 }
 
 // searchEventKind classifies a decoded search-mode keystroke.
@@ -578,7 +608,7 @@ func overlayStatus(ov *overlay, total, width int) string {
 		if ov.filter != "" {
 			text += "  /" + ov.filter
 		}
-		text += "   ⏎/y copy   r replay   j/k move   ^u/^d page   / filter   c collapse/expand   esc cancel"
+		text += "   ⏎/y copy   r replay   j/k move   u/d page   x delete   / filter   c collapse/expand   esc cancel"
 	}
 	return reverseLine(text, width)
 }

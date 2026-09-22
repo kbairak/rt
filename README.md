@@ -117,12 +117,13 @@ Open it with **`Ctrl-^`** at an idle prompt (it never triggers while a command o
 | ------------------- | ---------------------------------------------------- |
 | `j` / `k`, arrows   | Move selection older / newer                         |
 | `g` / `G`           | Jump to newest / oldest                              |
-| `Ctrl-D` / `Ctrl-U` | Half-page down / up                                  |
+| `d` / `u`           | Half-page down / up                                  |
 | `Enter` / `y`       | Copy the selected block to the system clipboard      |
 | `r`                 | Re-run the selected command                          |
 | `/`                 | Filter blocks by text; `Enter` applies, `Esc` clears |
 | `Ctrl-W`            | In filter mode, delete the last word                 |
 | `c`                 | Collapse / expand blocks                             |
+| `x`                 | Delete the selected block from history               |
 | `q` / `Esc`         | Close copy mode                                      |
 
 Clipboard writes use the native tool when available (`pbcopy`, `wl-copy`, `xclip`) and fall back to OSC 52.
